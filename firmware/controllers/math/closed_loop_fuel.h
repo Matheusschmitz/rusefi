@@ -6,6 +6,8 @@
 #include "deadband.h"
 #include "short_term_fuel_trim_state_generated.h"
 
+#include <rusefi/timer.h>
+
 struct stft_s;
 
 struct ClosedLoopFuelResult {
@@ -42,6 +44,14 @@ private:
 	Deadband<25> idleDeadband;
 	Deadband<2> overrunDeadband;
 	Deadband<2> loadDeadband;
+
+	// Periodic step mode: one observation window per bank
+	Timer m_stepTimer[FT_BANK_COUNT];
+	float m_stepErrorSum[FT_BANK_COUNT] = {};
+	uint16_t m_stepErrorCount[FT_BANK_COUNT] = {};
+	ft_region_e m_lastStepRegion = ftRegionIdle;
+
+	void updatePeriodicStep(size_t bank, ClosedLoopFuelCellBase& cell, float periodMs);
 
 	SensorType getSensorForBankIndex(size_t index);
 	ft_region_e computeStftBin(float rpm, float load, stft_s& cfg);

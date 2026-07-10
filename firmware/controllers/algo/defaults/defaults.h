@@ -7,6 +7,7 @@
 void setLeftRightBanksNeedBetterName();
 void setDefaultBaseEngine();
 void setDefaultFuel();
+void setDefaultStftCorrectionPeriodCurve();
 void setDefaultIgnition();
 void setDefaultCranking();
 void setGDIFueling();

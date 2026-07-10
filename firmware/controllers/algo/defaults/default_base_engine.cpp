@@ -182,6 +182,28 @@ void defaultsOrFixOnBurn() {
     }
   }
 
+  // Seed the STFT correction period curve and step settings for tunes that predate them
+  // (all-zero airflow axis). correctionAlgorithm intentionally stays 0 = integrator, so
+  // nothing changes until the user opts in to periodic step.
+  {
+    bool periodBinsEmpty = true;
+    for (size_t i = 0; i < efi::size(engineConfiguration->stft.correctionPeriodFlowBins); i++) {
+      if (engineConfiguration->stft.correctionPeriodFlowBins[i] != 0) {
+        periodBinsEmpty = false;
+        break;
+      }
+    }
+    if (periodBinsEmpty) {
+      setDefaultStftCorrectionPeriodCurve();
+    }
+    if (engineConfiguration->stft.trimStepGain == 0) {
+      engineConfiguration->stft.trimStepGain = 0.5f;
+    }
+    if (engineConfiguration->stft.maxStepPercent == 0) {
+      engineConfiguration->stft.maxStepPercent = 2.0f;
+    }
+  }
+
 #if HW_PROTEUS && defined(STM32F4XX)
   // should have been proteus per-board validation
   engineConfiguration->is_enabled_spi_5 = false;

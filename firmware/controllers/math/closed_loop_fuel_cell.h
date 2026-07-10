@@ -7,6 +7,9 @@ public:
 	// Update the cell's internal state - adjusting fuel up/down as appropriate
 	void update(float lambdaDeadband, bool ignoreErrorMagnitude);
 
+	// Periodic step mode: apply one discrete adjustment change, clamped to the cell's limits.
+	void applyStep(float delta);
+
 	// Get the current adjustment amount, without altering internal state.
 	float getAdjustment() const;
 

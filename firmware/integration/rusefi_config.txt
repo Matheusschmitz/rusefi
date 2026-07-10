@@ -294,6 +294,7 @@ struct_no_prefix engine_configuration_s
 #define ts_show_long_term_fuel_trim false
 
 #define STFT_CELL_COUNT 4
+#define STFT_PERIOD_CURVE_SIZE 8
 
 ! https://github.com/rusefi/rusefi/issues/8014 Total mess of rpmBin data types
 #define RPM_AS_BYTE_SCALE 100
@@ -359,6 +360,16 @@ struct stft_s
 	uint8_t startupDelay;Time after startup before closed loop operation is allowed.;"seconds", 1, 0, 0, 250, 0
 
 	stft_cell_cfg_s[STFT_CELL_COUNT iterate] cellCfgs;
+
+	uint16_t[STFT_PERIOD_CURVE_SIZE] autoscale correctionPeriodFlowBins;Airflow axis for the correction period curve.;"kg/h", 0.1, 0, 0, 6000, 1
+	uint16_t[STFT_PERIOD_CURVE_SIZE] correctionPeriodMs;Time for a fueling change to fully show up on the lambda sensor at this airflow: exhaust transport delay plus sensor response.\nThe periodic step algorithm waits this long between corrections so that each step is judged against a settled sensor reading.;"ms", 1, 0, 0, 5000, 0
+
+	#define stft_algo_e_enum "Integrator", "Periodic step"
+	custom stft_algo_e 1 bits, U08, @OFFSET@, [0:0], @@stft_algo_e_enum@@
+
+	stft_algo_e correctionAlgorithm;Integrator: continuous correction using the per-region time constant.\nPeriodic step: applies one correction of step gain times the average lambda error once per correction period, so the loop never corrects faster than the sensor can report. Much faster convergence, but requires the correction period curve to be calibrated.
+	uint8_t autoscale trimStepGain;Periodic step only: fraction of the measured lambda error corrected on each step. 0.50 corrects half of the remaining error per period.;"ratio", 0.01, 0, 0.1, 1, 2
+	uint8_t autoscale maxStepPercent;Periodic step only: maximum trim change applied by a single correction step.;"%", 0.1, 0, 0.5, 5, 1
 end_struct
 
 struct ltft_s

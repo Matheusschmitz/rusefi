@@ -124,6 +124,17 @@ void ShortTermFuelTrim::init(stft_s *stftCfg) {
 	}
 }
 
+// Periodic step mode: bounds for the correction period read from the curve, so a
+// zeroed or misconfigured curve can not make the loop step arbitrarily fast.
+static constexpr float MIN_CORRECTION_PERIOD_MS = 100.0f;
+static constexpr float MAX_CORRECTION_PERIOD_MS = 5000.0f;
+// Only the tail of the window reflects the settled response to the previous step,
+// so only that part is averaged into the error used for the next step.
+static constexpr float STEP_TAIL_FRACTION = 0.75f;
+// Minimum number of tail samples before a step may fire, in case learning was
+// paused (DFCO, accel, ...) for part of the window.
+static constexpr uint16_t STEP_MIN_SAMPLES = 5;
+
 ClosedLoopFuelResult ShortTermFuelTrim::getCorrection(float rpm, float fuelLoad) {
 	stftCorrectionState = getCorrectionState();
 	if (stftCorrectionState != stftEnabled) {
@@ -134,9 +145,30 @@ ClosedLoopFuelResult ShortTermFuelTrim::getCorrection(float rpm, float fuelLoad)
 		return {};
 	}
 
+	const auto& cfg = engineConfiguration->stft;
+
 	ClosedLoopFuelResult result;
 
 	result.region = stftCorrectionBinIdx = computeStftBin(rpm, fuelLoad, engineConfiguration->stft);
+
+	bool periodicStep = cfg.correctionAlgorithm == StftAlgo_PeriodicStep;
+	float periodMs = 0;
+	if (periodicStep) {
+		periodMs = interpolate2d(engine->engineState.airflowEstimate, cfg.correctionPeriodFlowBins, cfg.correctionPeriodMs);
+		periodMs = clampF(MIN_CORRECTION_PERIOD_MS, periodMs, MAX_CORRECTION_PERIOD_MS);
+
+		// A step is only valid against readings from the current cell, so start a
+		// fresh observation window whenever the region changes.
+		if (result.region != m_lastStepRegion) {
+			m_lastStepRegion = result.region;
+			for (size_t bank = 0; bank < FT_BANK_COUNT; bank++) {
+				m_stepErrorSum[bank] = 0;
+				m_stepErrorCount[bank] = 0;
+				m_stepTimer[bank].reset();
+			}
+		}
+	}
+	stftPeriodMs = (uint16_t)periodMs;
 
 	for (size_t bank = 0; bank < FT_BANK_COUNT; bank++) {
 		auto& cell = banks[bank].cells[stftCorrectionBinIdx];
@@ -146,7 +178,11 @@ ClosedLoopFuelResult ShortTermFuelTrim::getCorrection(float rpm, float fuelLoad)
 		stftLearningState[bank] = getLearningState(sensor);
 		if (stftLearningState[bank] == stftEnabled) {
 			stftInputError[bank] = cell.getLambdaError();
-			cell.update(PERCENT_DIV * engineConfiguration->stft.deadband, engineConfiguration->stftIgnoreErrorMagnitude);
+			if (periodicStep) {
+				updatePeriodicStep(bank, cell, periodMs);
+			} else {
+				cell.update(PERCENT_DIV * cfg.deadband, engineConfiguration->stftIgnoreErrorMagnitude);
+			}
 			stftLearningBinIdx = stftCorrectionBinIdx;
 		}
 
@@ -154,6 +190,40 @@ ClosedLoopFuelResult ShortTermFuelTrim::getCorrection(float rpm, float fuelLoad)
 	}
 
 	return result;
+}
+
+void ShortTermFuelTrim::updatePeriodicStep(size_t bank, ClosedLoopFuelCellBase& cell, float periodMs) {
+	const auto& cfg = engineConfiguration->stft;
+
+	float elapsedMs = m_stepTimer[bank].getElapsedSeconds() * 1000.0f;
+
+	// Average the error over the settled tail of the window instead of trusting
+	// a single reading - this filters sensor noise for free.
+	if (elapsedMs >= STEP_TAIL_FRACTION * periodMs) {
+		m_stepErrorSum[bank] += cell.getLambdaError();
+		m_stepErrorCount[bank]++;
+	}
+
+	// Wait out the full sensor response before judging the previous step
+	if (elapsedMs < periodMs || m_stepErrorCount[bank] < STEP_MIN_SAMPLES) {
+		return;
+	}
+
+	float avgError = m_stepErrorSum[bank] / m_stepErrorCount[bank];
+
+	// If we're within the deadband, make no adjustment - same policy as the integrator mode.
+	if (std::abs(avgError) >= PERCENT_DIV * cfg.deadband) {
+		if (engineConfiguration->stftIgnoreErrorMagnitude) {
+			avgError = avgError > 0 ? 0.1f : -0.1f;
+		}
+
+		float maxStep = PERCENT_DIV * cfg.maxStepPercent;
+		cell.applyStep(clampF(-maxStep, cfg.trimStepGain * avgError, maxStep));
+	}
+
+	m_stepErrorSum[bank] = 0;
+	m_stepErrorCount[bank] = 0;
+	m_stepTimer[bank].reset();
 }
 
 void ShortTermFuelTrim::onSlowCallback() {

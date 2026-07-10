@@ -766,6 +766,11 @@ typedef enum __attribute__ ((__packed__)) {
 } ve_override_e;
 
 typedef enum __attribute__ ((__packed__)) {
+	StftAlgo_Integrator = 0,
+	StftAlgo_PeriodicStep = 1,
+} stft_algo_e;
+
+typedef enum __attribute__ ((__packed__)) {
 	AFR_None = 0,
 	AFR_MAP = 1,
 	AFR_Tps = 2,

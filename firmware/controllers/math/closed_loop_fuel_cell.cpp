@@ -33,6 +33,10 @@ void ClosedLoopFuelCellBase::update(float lambdaDeadband, bool ignoreErrorMagnit
 	m_adjustment = clampF(getMinAdjustment(), adjust, getMaxAdjustment());
 }
 
+void ClosedLoopFuelCellBase::applyStep(float delta) {
+	m_adjustment = clampF(getMinAdjustment(), m_adjustment + delta, getMaxAdjustment());
+}
+
 float ClosedLoopFuelCellBase::getAdjustment() const {
 	return 1.0f + m_adjustment;
 }

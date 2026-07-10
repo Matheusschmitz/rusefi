@@ -148,6 +148,19 @@ static void setDefaultFuelCutParameters() {
 	engineConfiguration->coastingFuelCutClt = 60;
 }
 
+void setDefaultStftCorrectionPeriodCurve() {
+	auto& cfg = engineConfiguration->stft;
+
+	// Exhaust transport delay plus sensor response vs airflow, for a typical NA
+	// engine with the lambda sensor ~50cm downstream of the ports. Calibrate by
+	// stepping the lambda target at a steady operating point and measuring in the
+	// log how long the sensor takes to fully settle.
+	static const float periodFlowBins[STFT_PERIOD_CURVE_SIZE] = { 5, 10, 20, 40, 80, 120, 200, 350 };
+	static const float periodValues[STFT_PERIOD_CURVE_SIZE] = { 900, 650, 450, 320, 240, 200, 160, 130 };
+	copyArray(cfg.correctionPeriodFlowBins, periodFlowBins);
+	copyArray(cfg.correctionPeriodMs, periodValues);
+}
+
 static void setDefaultStftSettings() {
 	auto& cfg = engineConfiguration->stft;
 
@@ -187,6 +200,13 @@ static void setDefaultStftSettings() {
 		cfg.cellCfgs[i].maxAdd = 5;
 		cfg.cellCfgs[i].maxRemove = 5;
 	}
+
+	// The integrator stays the default; periodic step is opt-in and needs the
+	// correction period curve to be calibrated first.
+	cfg.correctionAlgorithm = StftAlgo_Integrator;
+	cfg.trimStepGain = 0.5f;
+	cfg.maxStepPercent = 2.0f;
+	setDefaultStftCorrectionPeriodCurve();
 }
 
 static void setDefaultLtftSettings() {

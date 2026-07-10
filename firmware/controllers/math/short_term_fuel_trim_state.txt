@@ -7,4 +7,6 @@ struct_no_prefix short_term_fuel_trim_state_s
 	stft_state_e stftCorrectionState
 	stft_state_e[FT_BANK_COUNT iterate] stftLearningState
 	float[FT_BANK_COUNT iterate] stftInputError;STFT: input Lambda error; "%", 100, 0, 50, 150, 1
+
+	uint16_t stftPeriodMs;STFT: active correction period; "ms", 1, 0, 0, 5000, 0
 end_struct
