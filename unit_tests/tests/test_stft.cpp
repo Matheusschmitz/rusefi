@@ -225,7 +225,10 @@ TEST(ClosedLoopFuel, PeriodicStepRegionChangeResetsWindow) {
 // First-order-plus-dead-time lambda response to the applied trim: lambda settles
 // at lambda0 - (trim - 1) once the trim has propagated through the dead time.
 struct FopdtLambdaPlant {
-	static constexpr int MAX_STEPS = 1000;
+	// Buffer capacity, not a trial length - callers pick how many of these 5ms
+	// ticks to actually run. 12000 covers up to 60 simulated seconds, enough to
+	// watch a slow (30s time constant) integrator run to completion.
+	static constexpr int MAX_STEPS = 12000;
 	static constexpr float DT = 0.005f;
 
 	float lambda0;
@@ -262,9 +265,10 @@ TEST(ClosedLoopFuel, PeriodicStepConvergesWithoutOvershoot) {
 	// within the 300ms correction period
 	FopdtLambdaPlant plant(1.10f, 0.060f, 0.040f);
 
+	constexpr int trialSteps = 1000; // 5 seconds
 	float trim = 1.0f;
 	float minLambda = plant.sensorLambda;
-	for (int i = 0; i < FopdtLambdaPlant::MAX_STEPS; i++) { // 5 seconds
+	for (int i = 0; i < trialSteps; i++) {
 		plant.tick(trim);
 		Sensor::setMockValue(SensorType::Lambda1, plant.sensorLambda);
 		trim = stft.getCorrection(2000, 50).banks[0];
@@ -279,6 +283,113 @@ TEST(ClosedLoopFuel, PeriodicStepConvergesWithoutOvershoot) {
 	EXPECT_NEAR(trim, 1.10f, 0.015f);
 	// ...without hunting past it
 	EXPECT_GT(minLambda, 0.985f);
+}
+
+struct ConvergenceResult {
+	float settleTimeSec; // -1 if it never entered the settle band within the trial
+	float overshootLambda; // how far past the target the sensor swung, 0 if it never did
+};
+
+// Runs a fresh STFT instance against a fresh plant for the requested tuning: either an
+// integrator time constant (seconds) or a periodic step correction period (ms), applied
+// flat across the whole curve/all cells so the trial isolates the tuning knob under test.
+static ConvergenceResult runConvergenceTrial(bool periodicStep, float tuningValue, int trialSteps) {
+	auto& cfg = engineConfiguration->stft;
+	cfg.correctionAlgorithm = periodicStep ? StftAlgo_PeriodicStep : StftAlgo_Integrator;
+
+	if (periodicStep) {
+		for (size_t i = 0; i < STFT_PERIOD_CURVE_SIZE; i++) {
+			cfg.correctionPeriodMs[i] = (uint16_t)tuningValue;
+		}
+	} else {
+		for (size_t i = 0; i < STFT_CELL_COUNT; i++) {
+			cfg.cellCfgs[i].timeConstant = tuningValue;
+		}
+	}
+
+	ShortTermFuelTrim stft;
+	stft.init(&cfg);
+
+	// Same plant as PeriodicStepConvergesWithoutOvershoot above: 10% lean, 60ms dead
+	// time + 40ms sensor lag, fully settled well inside the shortest period tried here.
+	FopdtLambdaPlant plant(1.10f, 0.060f, 0.040f);
+
+	constexpr float target = 1.0f;
+	constexpr float settleBand = 0.005f;
+
+	float trim = 1.0f;
+	float minLambda = plant.sensorLambda;
+	float settleTimeSec = -1;
+
+	for (int i = 0; i < trialSteps; i++) {
+		plant.tick(trim);
+		Sensor::setMockValue(SensorType::Lambda1, plant.sensorLambda);
+		trim = stft.getCorrection(2000, 50).banks[0];
+		advanceTimeUs(5'000);
+
+		if (plant.sensorLambda < minLambda) {
+			minLambda = plant.sensorLambda;
+		}
+		if (settleTimeSec < 0 && std::abs(plant.sensorLambda - target) < settleBand) {
+			settleTimeSec = i * FopdtLambdaPlant::DT;
+		}
+	}
+
+	return { settleTimeSec, std::max(0.0f, target - minLambda) };
+}
+
+// Head-to-head comparison of the integrator at several time constants against periodic
+// step at a couple of correction periods, all against the identical plant. Prints a
+// table so the numbers are visible directly in the test log, and asserts the headline
+// claim: periodic step settles dramatically faster than the integrator, with no more
+// overshoot.
+TEST(ClosedLoopFuel, CompareIntegratorTuningsVsPeriodicStep) {
+	EngineTestHelper eth(engine_type_e::TEST_ENGINE);
+	configurePeriodicStepStft(300); // baseline STFT/engine setup; tuning overridden per trial
+	engineConfiguration->stft.maxStepPercent = 5.0f;
+
+	constexpr int trialSteps = 12000; // 60 simulated seconds
+
+	struct Trial { const char* name; bool periodicStep; float tuning; };
+	Trial trials[] = {
+		{ "Integrator tau=5s",             false,   5.0f },
+		{ "Integrator tau=15s",            false,  15.0f },
+		{ "Integrator tau=30s (default)",  false,  30.0f },
+		{ "Periodic step T=300ms",         true,  300.0f },
+		{ "Periodic step T=600ms",         true,  600.0f },
+	};
+
+	printf("\n%-32s %12s %14s\n", "Configuration", "Settle (s)", "Overshoot (%)");
+	printf("--------------------------------------------------------------------\n");
+
+	ConvergenceResult results[efi::size(trials)];
+	for (size_t i = 0; i < efi::size(trials); i++) {
+		results[i] = runConvergenceTrial(trials[i].periodicStep, trials[i].tuning, trialSteps);
+
+		if (results[i].settleTimeSec < 0) {
+			printf("%-32s %12s %13.2f%%\n", trials[i].name, "> 60.0", results[i].overshootLambda * 100.0f);
+		} else {
+			printf("%-32s %12.2f %13.2f%%\n", trials[i].name, results[i].settleTimeSec, results[i].overshootLambda * 100.0f);
+		}
+
+		// Whatever the tuning, neither algorithm should overshoot past the target here -
+		// that would signal a tuning that is too aggressive for this plant.
+		EXPECT_LT(results[i].overshootLambda, 0.02f) << trials[i].name;
+	}
+	printf("\n");
+
+	// Headline claim: periodic step at a representative period settles several times
+	// faster than the default integrator tuning against the same plant.
+	auto& periodicDefault = results[3]; // T=300ms
+	auto& integratorDefault = results[2]; // tau=30s
+	ASSERT_GE(periodicDefault.settleTimeSec, 0.0f);
+	if (integratorDefault.settleTimeSec >= 0.0f) {
+		EXPECT_LT(periodicDefault.settleTimeSec * 5, integratorDefault.settleTimeSec);
+	} else {
+		// Integrator at tau=30s isn't even expected to settle within the 60s trial -
+		// that alone demonstrates the gap.
+		SUCCEED();
+	}
 }
 
 // Pin the integrator mode behavior through getCorrection(): the periodic step
