@@ -5,6 +5,7 @@ import com.devexperts.logging.Logging;
 import com.opensr5.ConfigurationImage;
 import com.opensr5.ini.IniFileModel;
 import com.rusefi.autodetect.PortDetector;
+import com.rusefi.autoupdate.Autoupdate;
 import com.rusefi.binaryprotocol.BinaryProtocolLogger;
 import com.rusefi.binaryprotocol.ShortcutsHelper;
 import com.rusefi.core.MessagesCentral;
@@ -18,6 +19,7 @@ import com.rusefi.ui.console.MainFrame;
 import com.rusefi.ui.console.TabbedPanel;
 import com.rusefi.ui.engine.EngineSnifferPanel;
 import com.rusefi.ui.lua.LuaScriptPanel;
+import com.rusefi.ui.plugins.ConsoleTabProvider;
 import com.rusefi.ui.util.JustOneInstance;
 import com.rusefi.ui.widgets.ConnectionStatusIcon;
 import com.rusefi.ui.wizard.WizardCatalog;
@@ -30,6 +32,7 @@ import com.rusefi.core.ui.AutoupdateUtil;
 import com.rusefi.util.LazyFile;
 import com.rusefi.util.LazyFileImpl;
 import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
 
 
 import javax.swing.*;
@@ -40,11 +43,12 @@ import com.rusefi.ui.basic.LoadTuneHelper;
 import java.awt.*;
 import java.awt.event.ActionEvent;
 import java.awt.event.ActionListener;
+import java.util.*;
+import java.util.concurrent.CompletableFuture;
 import java.util.function.Supplier;
 import java.io.IOException;
 import java.lang.reflect.InvocationTargetException;
-import java.util.HashMap;
-import java.util.Map;
+import java.net.URL;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 
@@ -106,8 +110,12 @@ public class ConsoleUI {
      * @param initialImage   ConfigurationImage loaded from the MSQ file
      * @param connectivityContext
      */
-    public ConsoleUI(UIContext uiContext, IniFileModel ini, ConfigurationImage initialImage, ConnectivityContext connectivityContext) {
-        this(uiContext, null, SerialPortType.Unknown, false, ini, initialImage, null, connectivityContext);
+    /**
+     * [tag:offline_tune] Offline console that reuses the already-visible, maximized splash
+     * {@code reuseFrame} instead of opening a second window — same handoff the online path uses (#9715).
+     */
+    public ConsoleUI(UIContext uiContext, IniFileModel ini, ConfigurationImage initialImage, JFrame reuseFrame, ConnectivityContext connectivityContext) {
+        this(uiContext, null, SerialPortType.Unknown, false, ini, initialImage, reuseFrame, connectivityContext);
     }
 
     /**
@@ -123,6 +131,39 @@ public class ConsoleUI {
                 realAction.get().actionPerformed(e);
             }
         };
+    }
+
+    /**
+     * The follow-a-renumbered-ECU decision: which port, if any, should the live session repoint to
+     * after the board re-enumerated. Empty unless the port we were on has VANISHED (while it is still
+     * present the watchdog's same-name restart() owns the reconnect) and the scanner has classified
+     * exactly ONE candidate ECU on a different port — with zero or several candidates we cannot know
+     * which one is our board, so we stay put rather than hijack a stranger. [tag:better_ux_for_flashing]
+     * <p>
+     * NB: intentionally NOT gated on ConnectionStatusLogic.isConnected(). After an OpenBLT switch the
+     * status can stay stale "connected", which would block recovery forever; if the port we were on is
+     * gone, the link is dead regardless of the status flag.
+     * <p>
+     * Package-private static so ConsoleUiEcuPortToFollowTest can drive it directly.
+     */
+    static Optional<String> ecuPortToFollow(final @Nullable String currentPort,
+                                            final Collection<String> commPorts,
+                                            final java.util.List<PortResult> ecuPorts,
+                                            final boolean disconnectedByUser) {
+        if (disconnectedByUser) {
+            return Optional.empty();
+        }
+        if (currentPort == null || commPorts.contains(currentPort)) {
+            return Optional.empty();
+        }
+        if (ecuPorts.size() != 1) {
+            return Optional.empty();
+        }
+        final String newPort = ecuPorts.get(0).port;
+        if (newPort.equals(currentPort)) {
+            return Optional.empty();
+        }
+        return Optional.of(newPort);
     }
 
     private ConsoleUI(UIContext uiContext, String port, SerialPortType serialPortType,
@@ -147,6 +188,12 @@ public class ConsoleUI {
         // Pass the tabbed pane so the icon can turn purple when a board is in a DFU/OpenBLT bootloader
         // (DevicePane publishes the "bootloaderMode" client property on it). [tag:better_ux_for_flashing]
         ConnectionStatusIcon connectionStatus = new ConnectionStatusIcon(linkManager, tabbedPane.tabbedPane);
+
+        // [tag:offline_tune] Mirror offline mode onto a tabbedPane client property so the connection
+        // status icon (and anything else watching) can surface it, same mechanism as "bootloaderMode".
+        tabbedPane.tabbedPane.putClientProperty("offlineMode", uiContext.isOfflineMode() ? Boolean.TRUE : null);
+        uiContext.addOfflineModeListener(offline -> SwingUtilities.invokeLater(() ->
+                tabbedPane.tabbedPane.putClientProperty("offlineMode", offline ? Boolean.TRUE : null)));
         this.port = port;
 
         // Follow a renumbered ECU across a bootloader round-trip. After a reboot to DFU/OpenBLT *without*
@@ -156,29 +203,14 @@ public class ConsoleUI {
         // were on has vanished, repoint the LinkManager there. [tag:better_ux_for_flashing]
         if (!isOffline) {
             connectivityContext.getPortScanner().addListener(currentHardware -> {
-                if (linkManager.isDisconnectedByUser()) {
-                    return;
-                }
-                // NB: intentionally NOT gated on ConnectionStatusLogic.isConnected(). After an OpenBLT
-                // switch the status can stay stale "connected", which would block recovery forever.
-                // if the port we were on is gone, the link is
-                // dead regardless of the status flag; while genuinely connected that port is still present
-                // so we skip and let the watchdog's same-name restart() own the reconnect.
                 final String currentPort = linkManager.getLastTriedPort();
-                if (currentPort == null || LinkManager.getCommPorts().contains(currentPort)) {
-                    return;
-                }
                 final java.util.List<PortResult> ecuPorts = currentHardware.getKnownPorts(
                     CompatibilitySet.of(SerialPortType.Ecu, SerialPortType.EcuWithOpenblt));
-                if (ecuPorts.size() != 1) {
-                    return;
-                }
-                final String newPort = ecuPorts.get(0).port;
-                if (newPort.equals(currentPort)) {
-                    return;
-                }
-                log.info("ECU reappeared on " + newPort + " (was " + currentPort + ") — following renumbered port");
-                linkManager.execute(() -> linkManager.reconnect(newPort));
+                ecuPortToFollow(currentPort, LinkManager.getCommPorts(), ecuPorts, linkManager.isDisconnectedByUser())
+                    .ifPresent(newPort -> {
+                        log.info("ECU reappeared on " + newPort + " (was " + currentPort + ") — following renumbered port");
+                        linkManager.execute(() -> linkManager.reconnect(newPort));
+                    });
             });
         }
 
@@ -221,7 +253,9 @@ public class ConsoleUI {
         JPanel cornerPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 5, 0));
         cornerPanel.setOpaque(false);
         cornerPanel.add(connectionStatus);
-        cornerPanel.add(launchWizardButton);
+        if (UiProperties.isLaunchWizardEnabled()) {
+            cornerPanel.add(launchWizardButton);
+        }
         tabbedPane.setCornerComponent(cornerPanel);
 
         // ---------------
@@ -301,6 +335,14 @@ console live data tab is broken #8402
             tabbedPane.addTab("Live Data", LiveDataPane.createLazy(uiContext).getContent());
  */
             PinoutPane pinoutPane = new PinoutPane(uiContext);
+            PortResult initialPort = (port != null) ? new PortResult(port, serialPortType) : null;
+            DeviceSessionManager deviceSessionManager = new DeviceSessionManager(connectivityContext, initialPort);
+
+            // [tag:offline_tune] Seed the loaded tune image so config-image-driven panes (e.g. PinoutPane's
+            // "Tune use" column) have data with no live ECU — the online path gets this from BinaryProtocol.
+            if (isOffline && offlineImage != null) {
+                uiContext.fireConfigImageChanged(offlineImage);
+            }
 
             // Tuning is heavy (~60ms) and not always the startup tab. Build it on first use — tab
             // shown, File>Load/Save Tune, or Pinout→Tune nav — unless it's the restored tab (#9715).
@@ -312,9 +354,15 @@ console live data tab is broken #8402
                 }
                 TuningPane tp = new TuningPane(uiContext, offlineImage, getConfig().getRoot().getChild("tuning"));
                 tuningHolder[0] = tp;
+                tp.setFirmwareUpdateInProgress(deviceSessionManager.getState() == SessionState.FLASHING);
+                tp.setShowTuningTab(() -> tabbedPane.selectTab("Tuning"));
                 if (isOffline && offlineImage != null) {
                     tp.seedOfflineImage(offlineImage, null);
                 }
+                mainFrame.setExitRequestHandler(() ->
+                        tp.requestExit(mainFrame.getFrame().getFrame(),
+                            () -> mainFrame.getFrame().getFrame().dispose(),
+                            deviceSessionManager.getState() == SessionState.FLASHING));
                 mainFrame.setTuneActions(tp.getLoadTuneAction(), tp.getSaveTuneAction());
                 if (UiProperties.isPinoutEnabled()) {
                     tp.setNavigateToPinout(enumValue -> {
@@ -340,14 +388,14 @@ console live data tab is broken #8402
                 lazyTuneAction(LoadTuneHelper.LOAD_TUNE_TEXT, buildTuning, () -> tuningHolder[0].getLoadTuneAction()),
                 lazyTuneAction(LoadTuneHelper.SAVE_TUNE_TEXT, buildTuning, () -> tuningHolder[0].getSaveTuneAction()));
 
-            tabbedPane.addTab("Knock Analyzer", new KnockPane(uiContext).getContent());
+            if (UiProperties.isKnockAnalyzerEnabled()) {
+                tabbedPane.addTab("Knock Analyzer", new KnockPane(uiContext).getContent());
+            }
             if (UiProperties.isPinoutEnabled()) {
                 tabbedPane.addTab("Pinout", pinoutPane.getContent());
             }
             // Single-session device manager [tag:better_ux_for_flashing]: the scanner is kept alive for the whole console
             // lifetime so this one instance can hook / remove / re-connect / DFU / OpenBLT the board.
-            PortResult initialPort = (port != null) ? new PortResult(port, serialPortType) : null;
-            DeviceSessionManager deviceSessionManager = new DeviceSessionManager(connectivityContext, initialPort);
             DevicePane devicePane = new DevicePane(uiContext, connectivityContext, deviceSessionManager, tabbedPane.tabbedPane);
             tabbedPane.addTab("Device", devicePane.getContent());
             mainFrame.setUpdateEcuAction(() -> {
@@ -355,8 +403,22 @@ console live data tab is broken #8402
                 devicePane.triggerAutoUpdate();
             });
 
+            addCustomTabs();
+
+            deviceSessionManager.addListener((state, hardware) -> SwingUtilities.invokeLater(() -> {
+                boolean flashing = state == SessionState.FLASHING;
+                mainFrame.setFirmwareUpdateInProgress(flashing);
+                launchWizardButton.setEnabled(!flashing);
+                if (tuningHolder[0] != null) {
+                    tuningHolder[0].setFirmwareUpdateInProgress(flashing);
+                }
+            }));
+
             // Pinout ↔ Tune bidirectional navigation
             pinoutPane.setNavigateToTune((dialogKey, fieldKey) -> {
+                if (deviceSessionManager.getState() == SessionState.FLASHING) {
+                    return;
+                }
                 buildTuning.run();
                 tabbedPane.selectTab("Tuning");
                 tuningHolder[0].navigateToField(dialogKey, fieldKey);
@@ -406,7 +468,8 @@ console live data tab is broken #8402
             }
         });
 
-        ShortcutsHelper.installConnectAndDisconnect(uiContext, tabbedPane.tabbedPane);
+        ShortcutsHelper.installConnectAndDisconnect(uiContext, tabbedPane.tabbedPane,
+            () -> !Boolean.TRUE.equals(tabbedPane.tabbedPane.getClientProperty("isUpdating")));
         AutoupdateUtil.setAppIcon(mainFrame.getFrame().getFrame());
 
         mainFrame.getFrame().showFrame(rootPanel);
@@ -431,6 +494,53 @@ console live data tab is broken #8402
         return port;
     }
 
+    private void addCustomTabs() {
+        String serviceResource = "META-INF/services/" + ConsoleTabProvider.class.getName();
+        ClassLoader classLoader = Thread.currentThread().getContextClassLoader();
+        if (classLoader == null) {
+            classLoader = ConsoleUI.class.getClassLoader();
+        }
+        try {
+            // Enumerate the service-declaration files actually visible on the classpath, so a missing
+            // META-INF/services entry is distinguishable from a
+            // provider that failed to instantiate.
+            java.util.List<URL> serviceFiles = Collections.list(classLoader.getResources(serviceResource));
+            log.info("addCustomTabs: found " + serviceFiles.size() + " '" + serviceResource + "' file(s) on classpath: " + serviceFiles);
+        } catch (Throwable e) {
+            log.error("addCustomTabs: failed to enumerate '" + serviceResource + "' on classpath", e);
+        }
+
+        int providerCount = 0;
+        try {
+            Iterator<ConsoleTabProvider> iterator = ServiceLoader.load(ConsoleTabProvider.class, classLoader).iterator();
+            // hasNext()/next() are where ServiceLoader parses the service file and instantiates providers,
+            // so a broken provider throws ServiceConfigurationError here rather than at load(). Guard each
+            // step so one bad provider does not hide the others.
+            while (true) {
+                ConsoleTabProvider provider;
+                try {
+                    if (!iterator.hasNext()) {
+                        break;
+                    }
+                    provider = iterator.next();
+                } catch (Throwable e) {
+                    log.error("addCustomTabs: ServiceLoader failed to instantiate a ConsoleTabProvider", e);
+                    break;
+                }
+                providerCount++;
+                try {
+                    log.info("addCustomTabs: adding custom console tab '" + provider.getTitle() + "' from " + provider.getClass().getName());
+                    tabbedPane.addTab(provider.getTitle(), provider.createTab(uiContext));
+                } catch (Throwable e) {
+                    log.error("addCustomTabs: failed to add custom console tab from " + provider.getClass().getName(), e);
+                }
+            }
+        } catch (Throwable e) {
+            log.error("addCustomTabs: failed to load custom console tabs", e);
+        }
+        log.info("addCustomTabs: " + providerCount + " ConsoleTabProvider(s) discovered via ServiceLoader");
+    }
+
     private static void writeReadmeFile() {
         LazyFile file = new LazyFileImpl(FileLogger.DIR + "README.html");
         file.write("<center>" + "<a href='" + WIKI_URL + "'>More info online<br/><img src=https://raw.githubusercontent.com/wiki/rusefi/rusefi/logo.gif></a>");
@@ -442,10 +552,10 @@ console live data tab is broken #8402
     }
 
     static void startUi(String[] args) throws InterruptedException, InvocationTargetException {
-        startUi(args, null);
+        startUi(args, CompletableFuture.completedFuture(Autoupdate.UpdateOutcome.SKIPPED));
     }
 
-    static void startUi(String[] args, AtomicReference<Consumer<String>> bannerCallback) throws InterruptedException, InvocationTargetException {
+    static void startUi(String[] args, CompletableFuture<Autoupdate.UpdateOutcome> updateOutcome) throws InterruptedException, InvocationTargetException {
         if (ConnectionAndMeta.saveReadmeHtmlToFile()) {
             new Thread(ConsoleUI::writeReadmeFile).start();
         }
@@ -454,7 +564,7 @@ console live data tab is broken #8402
         AutotestLogging.suspendLogging = getConfig().getRoot().getBoolProperty(GaugesPanel.DISABLE_LOGS);
         commonUiStartup();
 // not very useful?        VersionChecker.start();
-        SwingUtilities.invokeAndWait(() -> awtCode(args, bannerCallback));
+        SwingUtilities.invokeAndWait(() -> awtCode(args, updateOutcome));
     }
 
     /**
@@ -465,7 +575,7 @@ console live data tab is broken #8402
         tabbedPane.addTab(title, component);
     }
 
-    private static void awtCode(String[] args, AtomicReference<Consumer<String>> bannerCallback) {
+    private static void awtCode(String[] args, CompletableFuture<Autoupdate.UpdateOutcome> updateOutcome) {
         if (JustOneInstance.isAlreadyRunning()) {
             int result = JOptionPane.showConfirmDialog(createOnTopParent(), "Looks like another instance is already running. Do you really want to start another instance?",
                 TITLE, JOptionPane.YES_NO_OPTION);
@@ -500,9 +610,8 @@ console live data tab is broken #8402
             } else {
                 for (String p : LinkManager.getCommPorts())
                     MessagesCentral.getInstance().postMessage(Launcher.class, "Available port: " + p);
-                StartupFrame startupFrame = new StartupFrame(connectivityContext, new UIContext(connectivityContext.getConnectedEcuTarget()));
-                if (bannerCallback != null)
-                    bannerCallback.set(message -> startupFrame.restartConsole());
+                StartupFrame startupFrame = new StartupFrame(connectivityContext,
+                    new UIContext(connectivityContext.getConnectedEcuTarget()), updateOutcome);
                 startupFrame.showUi();
             }
 

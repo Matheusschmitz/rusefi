@@ -47,6 +47,16 @@ extern std::optional<custom_validate_config_type> custom_board_validateConfig;
 using setup_custom_board_ts_command_override_type = void (*)(uint16_t /*subsystem*/, uint16_t /*index*/);
 extern std::optional<setup_custom_board_ts_command_override_type> custom_board_ts_command;
 
+// Board-specific TunerStudio binary command handler. Unlike custom_board_ts_command
+// (which rides on TS_EXECUTE and is fire-and-forget), this hook receives the channel and
+// the raw request payload so a board can implement a full binary request/response. It is invoked for opcodes the
+// base firmware does not recognize (see TS_BOARD_COMMAND / handleCrcCommand). `data`
+// points at the payload (the command byte already consumed) and `size` is its length in
+// bytes. Return true if the command was handled; false lets the base firmware NAK it.
+class TsChannelBase;
+using board_ts_binary_command_type = bool (*)(TsChannelBase* /*tsChannel*/, char /*command*/, uint8_t* /*data*/, uint16_t /*size*/);
+extern std::optional<board_ts_binary_command_type> custom_board_ts_binary_command;
+
 #if !defined(EFI_BOOTLOADER) && EFI_FILE_LOGGING && EFI_PROD_CODE
 #include "ff.h"
 using setup_custom_board_write_error_file_type = void (*)(FIL * /*fd*/);
@@ -75,6 +85,19 @@ extern std::optional<setup_custom_board_overrides_type> custom_board_InitHardwar
 extern std::optional<setup_custom_board_overrides_type> custom_board_InitHardware;
 extern std::optional<setup_custom_board_overrides_type> custom_board_InitHardwareExtra;
 extern std::optional<setup_custom_board_config_type> custom_board_OnConfigurationChange;
+
+// Dynamic hardware re-init participation (see docs/hardware-reinit-and-power-cycle.md).
+// custom_board_OnConfigurationChange fires only AFTER applyNewHardwareSettings() has finished
+// starting hardware, so it cannot release pins - a stale board claim makes the pin repository
+// reject the new owner with a criticalError. Boards that claim user-configurable pins must
+// instead use this pair, which follows the all-stops-before-any-starts invariant:
+// - custom_board_StopHardware: called during the stop phase of applyNewHardwareSettings(),
+//   while activeConfiguration still describes the previously claimed pins - release them here.
+// - custom_board_StartHardware: called from startHardware() on BOTH ECU start and configuration
+//   change - claim pins here from engineConfiguration.
+// Boards claiming only fixed pins (not user-configurable) can keep using custom_board_InitHardware.
+extern std::optional<setup_custom_board_overrides_type> custom_board_StopHardware;
+extern std::optional<setup_custom_board_overrides_type> custom_board_StartHardware;
 
 extern std::optional<setup_custom_board_overrides_type> custom_board_TriggerResetState;
 

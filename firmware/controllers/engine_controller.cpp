@@ -69,10 +69,6 @@
 #include "logic_analyzer.h"
 #endif /* EFI_LOGIC_ANALYZER */
 
-#if defined(EFI_BOOTLOADER_INCLUDE_CODE)
-#include "bootloader/bootloader.h"
-#endif /* EFI_BOOTLOADER_INCLUDE_CODE */
-
 #include "periodic_task.h"
 #include "board_overrides.h"
 
@@ -203,6 +199,14 @@ static void doPeriodicSlowCallback() {
 #endif // EFI_TCU
 
 	tryResetWatchdog();
+
+#if EFI_PROD_CODE
+	// single-shot reset all counter after 5 second of happines
+	static unsigned int slow_counter = 5 * 1000 / SLOW_CALLBACK_PERIOD_MS;
+	if ((slow_counter) && (--slow_counter == 0)) {
+		errorHandlerResetCounters();
+	}
+#endif // EFI_PROD_CODE
 }
 
 void initPeriodicEvents() {
@@ -800,11 +804,6 @@ void initRealHardwareEngineController() {
  * See also SIGNATURE_HASH
  */
 int getRusEfiVersion() {
-#if defined(EFI_BOOTLOADER_INCLUDE_CODE)
-	// make bootloader code happy too
-	if (initBootloader() != 0)
-		return 123;
-#endif /* EFI_BOOTLOADER_INCLUDE_CODE */
 	return VCS_DATE;
 }
 #endif /* EFI_UNIT_TEST */

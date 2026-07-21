@@ -1,9 +1,14 @@
 package com.rusefi.mcp;
 
 import com.devexperts.logging.Logging;
+import com.opensr5.ConfigurationImage;
+import com.opensr5.ini.IniFileModel;
 import com.rusefi.binaryprotocol.BinaryProtocol;
+import com.rusefi.config.generated.Integration;
 import com.rusefi.core.SensorCentral;
 import com.rusefi.core.MessagesCentral;
+import com.rusefi.tune.xml.Msq;
+import com.rusefi.tune.xml.MsqFactory;
 import com.rusefi.ui.lua.LuaIncludeSyntax;
 import com.rusefi.io.LinkManager;
 import com.rusefi.io.lua.LuaService;
@@ -12,6 +17,7 @@ import org.json.simple.JSONObject;
 import org.json.simple.parser.JSONParser;
 
 import java.io.BufferedReader;
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.PrintStream;
@@ -34,8 +40,10 @@ import static com.devexperts.logging.Logging.getLogging;
  * <ul>
  *     <li><code>initialize</code></li>
  *     <li><code>tools/list</code></li>
- *     <li><code>tools/call</code> for: set_lua, get_lua, lua_reset, send_command,
- *         read_messages, wait_for_message, ecu_info, connect</li>
+ *     <li><code>tools/call</code> for: connect, ecu_info, set_lua, get_lua, lua_reset,
+ *         send_command (alias: command), read_output_channel, read_messages,
+ *         wait_for_message, read_tune, reboot, reboot_to_blt — see
+ *         java_console/mcp_ecu/README.md for the tool reference</li>
  *     <li><code>notifications/initialized</code></li>
  * </ul>
  *
@@ -245,59 +253,97 @@ public class EcuMcpServer {
         JSONArray tools = new JSONArray();
         tools.add(tool("connect",
                 "Connect to the ECU (autodetect serial port unless --port was passed on startup). " +
-                        "Most other tools call this implicitly.",
+                        "Most other tools call this implicitly. Returns 'connected' and the firmware 'signature'.",
                 schemaObject(new String[][]{
-                        {"port", "string", "Optional serial port name; autodetect if omitted."}
+                        {"port", "string", "Optional serial port name (e.g. /dev/ttyACM0, COM5); autodetect if omitted. " +
+                                "Ignored if a connection is already active."}
                 }, new String[]{}, false)));
         tools.add(tool("ecu_info",
-                "Return signature + LUASCRIPT field metadata (offset, maximum script size in bytes).",
+                "Return signature + LUASCRIPT field metadata: 'luascript.offset' and 'luascript.maxSize' " +
+                        "(script size budget in bytes; set_lua fails beyond it).",
                 emptyObjectSchema()));
         tools.add(tool("set_lua",
                 "Upload a Lua script to the ECU (write LUASCRIPT, burn flash, then luareset). " +
-                        "Provide either 'script' (inline source) or 'path' (file on the MCP server host).",
+                        "Provide either 'script' (inline source) or 'path' (file on the MCP server host); " +
+                        "'script' takes precedence if both are given. " +
+                        "Returns success, bytesWritten, fieldSize, burnSucceeded.",
                 schemaObject(new String[][]{
-                        {"script", "string", "Inline Lua source (ASCII)."},
-                        {"path", "string", "Path to a .lua file on the MCP server host."},
-                        {"timeoutMs", "integer", "Operation timeout in ms. Default 120000."}
+                        {"script", "string", "Inline Lua source. ASCII only — non-ASCII characters are not transmitted."},
+                        {"path", "string", "Path to a .lua file on the MCP server host (not the client). " +
+                                "'--include <file>' directives are expanded relative to the file's directory."},
+                        {"timeoutMs", "integer", "Write + burn timeout in ms. Default 120000."}
                 }, new String[]{}, false)));
         tools.add(tool("get_lua",
-                "Read the currently-flashed Lua script from the cached controller image.",
+                "Read the currently-flashed Lua script from the cached controller image. " +
+                        "Returns 'script' and 'length'.",
                 emptyObjectSchema()));
         tools.add(tool("lua_reset",
-                "Send 'luareset' to restart the Lua VM on the ECU.",
+                "Send 'luareset' to restart the Lua VM on the ECU. " +
+                        "'queued: true' means accepted into the command queue, not that the ECU executed it.",
                 emptyObjectSchema()));
         tools.add(tool("send_command",
                 "Send an arbitrary text command via the standard command queue " +
-                        "(e.g. 'lua 1+2', 'rpm', 'help').",
+                        "(e.g. 'lua 1+2', 'rpm', 'help'). Fire-and-forget: any output arrives as ECU " +
+                        "messages — read it back with read_messages or wait_for_message.",
                 schemaObject(new String[][]{
                         {"command", "string", "Command text."}
                 }, new String[]{"command"}, false)));
         tools.add(tool("command",
-                "Alias for send_command. Sends arbitrary text to the standard command queue.",
+                "Alias for send_command. Sends arbitrary text to the standard command queue; " +
+                        "output arrives as ECU messages.",
                 schemaObject(new String[][]{
                         {"command", "string", "Command text."}
                 }, new String[]{"command"}, false)));
         tools.add(tool("read_output_channel",
-                "Read latest output-channel value by channel name from SensorCentral.",
+                "Read latest output-channel value by channel name from SensorCentral. " +
+                        "'found: false' means unknown channel OR no data received yet — retry before " +
+                        "concluding the name is wrong.",
                 schemaObject(new String[][]{
-                        {"name", "string", "Output-channel name (case-insensitive)."}
+                        {"name", "string", "Output-channel (gauge) name, case-insensitive, e.g. 'RPMValue'."}
                 }, new String[]{"name"}, false)));
         tools.add(tool("read_messages",
                 "Return ECU messages from the in-memory ring buffer captured via MessagesCentral " +
-                        "(this is the same stream the Swing MessagesView shows, including Lua print() output).",
+                        "(this is the same stream the Swing MessagesView shows, including Lua print() output). " +
+                        "Messages come oldest-first; when more than maxLines match, the newest are cut off — " +
+                        "page forward by passing the last returned seq as sinceSeq. Also returns 'latestSeq', " +
+                        "the newest captured sequence number.",
                 schemaObject(new String[][]{
-                        {"sinceSeq", "integer", "Only return messages with seq strictly greater than this."},
-                        {"maxLines", "integer", "Maximum number of messages to return. Default 200."},
-                        {"sourceFilter", "string", "Optional substring filter on source class name."}
+                        {"sinceSeq", "integer", "Only return messages with seq strictly greater than this. " +
+                                "Use a previously returned seq/latestSeq to read incrementally."},
+                        {"maxLines", "integer", "Maximum number of messages to return (oldest first). Default 200."},
+                        {"sourceFilter", "string", "Optional substring filter on source class name (e.g. 'Lua')."}
                 }, new String[]{}, false)));
         tools.add(tool("wait_for_message",
                 "Block until an ECU message matches the given regex, or timeout. " +
-                        "Returns the matching message (or success=false on timeout).",
+                        "Returns the matching message (or success=false on timeout). " +
+                        "Already-buffered messages are checked first, so a stale message can match — " +
+                        "pass sinceSeq captured before triggering the action you are waiting on.",
                 schemaObject(new String[][]{
-                        {"regex", "string", "Java regex matched against the message text."},
+                        {"regex", "string", "Java regex, find() semantics: succeeds if it matches anywhere " +
+                                "inside the message text (source is not matched)."},
                         {"timeoutMs", "integer", "Wait timeout in ms. Default 10000."},
                         {"sinceSeq", "integer", "Only consider messages with seq strictly greater than this."}
                 }, new String[]{"regex"}, false)));
+        tools.add(tool("read_tune",
+                "Read the complete tune (all calibration constants) from the ECU and save it as a " +
+                        "TunerStudio-compatible .msq file on the MCP server host. The tune is built from " +
+                        "the controller configuration image fetched over this connection plus the matching " +
+                        ".ini definition. Returns 'path', 'constantCount', 'fileSize' and 'signature'. " +
+                        "The file is XML and can be large — read it with file tools rather than inlining it.",
+                schemaObject(new String[][]{
+                        {"path", "string", "Output .msq file path on the MCP server host (not the client). " +
+                                "Default: a temp file named rusefi_tune_*.msq."}
+                }, new String[]{}, false)));
+        tools.add(tool("reboot",
+                "Reboot the ECU (send '" + Integration.CMD_REBOOT + "'). The serial link drops while the ECU " +
+                        "restarts — reconnect (any ECU-touching tool reconnects implicitly) after a few seconds.",
+                emptyObjectSchema()));
+        tools.add(tool("reboot_to_blt",
+                "Reboot the ECU into the OpenBLT bootloader (send '" + Integration.CMD_REBOOT_OPENBLT + "'). " +
+                        "The firmware stops and the serial link drops; the ECU re-enumerates as an OpenBLT " +
+                        "device for firmware update. Normal tools will not work until the ECU is power-cycled " +
+                        "or new firmware is flashed.",
+                emptyObjectSchema()));
 
         JSONObject result = new JSONObject();
         result.put("tools", tools);
@@ -321,6 +367,9 @@ public class EcuMcpServer {
                 case "read_output_channel": toolResult = doReadOutputChannel(args); break;
                 case "read_messages": toolResult = doReadMessages(args); break;
                 case "wait_for_message": toolResult = doWaitForMessage(args); break;
+                case "read_tune":   toolResult = doReadTune(args); break;
+                case "reboot":      toolResult = doReboot(Integration.CMD_REBOOT); break;
+                case "reboot_to_blt": toolResult = doReboot(Integration.CMD_REBOOT_OPENBLT); break;
                 default:
                     return toolError("Unknown tool: " + name);
             }
@@ -435,6 +484,45 @@ public class EcuMcpServer {
         JSONObject o = new JSONObject();
         o.put("queued", true);
         o.put("command", cmd);
+        return o;
+    }
+
+    @SuppressWarnings("unchecked")
+    private JSONObject doReadTune(JSONObject args) throws Exception {
+        String path = (String) args.get("path");
+
+        LinkManager lm = ensureConnected(null);
+        BinaryProtocol bp = lm.getBinaryProtocol();
+        if (bp == null)
+            return errorBody("Binary protocol not established yet");
+        ConfigurationImage image = bp.getControllerConfiguration();
+        if (image == null)
+            return errorBody("Controller configuration image not available yet");
+        IniFileModel ini = bp.getIniFileNullable();
+        if (ini == null)
+            return errorBody("No .ini model for this connection");
+
+        Msq tune = MsqFactory.valueOf(image, ini);
+        File outputFile = path != null ? new File(path) : File.createTempFile("rusefi_tune_", ".msq");
+        tune.writeXmlFile(outputFile.getAbsolutePath());
+
+        JSONObject o = new JSONObject();
+        o.put("success", true);
+        o.put("path", outputFile.getAbsolutePath());
+        o.put("constantCount", (long) tune.findPage().constant.size());
+        o.put("fileSize", outputFile.length());
+        o.put("signature", String.valueOf(bp.signature));
+        return o;
+    }
+
+    @SuppressWarnings("unchecked")
+    private JSONObject doReboot(String command) throws Exception {
+        LinkManager lm = ensureConnected(null);
+        LuaService.sendCommand(lm, command);
+        JSONObject o = new JSONObject();
+        o.put("queued", true);
+        o.put("command", command);
+        o.put("note", "serial link will drop while the ECU restarts");
         return o;
     }
 

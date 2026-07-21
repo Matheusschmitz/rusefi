@@ -107,7 +107,7 @@
 ! This is the version of the data stored in flash configuration
 ! Any time an incompatible change is made to the configuration format stored in flash,
 ! update this string to the current date!
-#define FLASH_DATA_VERSION 260529
+#define FLASH_DATA_VERSION 260714
 
 ! Remove next line when Java toolset gets adjusted to load those from json config into VariablesRegistry
 ! Also remove file integration/generated/rusefi_config_generated_enums.txt
@@ -238,6 +238,7 @@ struct_no_prefix engine_configuration_s
 #define VVT_OFFSET_1_1_NAME "VVT offset bank 1 intake"
 #define GEAR_DETECTION_DIALOG_NAME "Gear Detection"
 #define ts_show_final_ratio true
+#define ts_show_bench_test true
 #define ts_show_ltft_sd_card_message true
 #define ts_show_vehicle_name true
 #define ts_show_cranking_rpm true
@@ -341,6 +342,8 @@ struct_no_prefix engine_configuration_s
 
 #define PRIMARY_CAN_NAME "Primary CAN"
 #define SECONDARY_CAN_NAME "Secondary CAN"
+
+#define I2C_BUS_TOTAL_COUNT 4
 
 struct stft_cell_cfg_s
 	uint8_t autoscale maxAdd;Maximum % that the short term fuel trim can add;"%", 0.1, 0, 0, 25, 1
@@ -971,8 +974,36 @@ spi_device_e digitalPotentiometerSpiDevice;Digital Potentiometer is used by stoc
 	! hack not to break tunes before 2779925f54f5c2d23499cbb2797f71508c652f54 "injector lag lookup should be done based on differential pressure"
 	bit useAbsolutePressureForLagTime,"yes","no"
 	! see #8650, only used on the UI
-	bit unusedBit_311_30
-	bit unusedBit_311_31
+
+	bit idleReturnTargetRamp,"yes","no";Ramp the idle target down from the entry threshold over N seconds when returning to idle. Helps prevent overshooting (below) the idle target while returning to idle from coasting.
+	bit useInjectorFlowLinearizationTable,"yes","no"
+	bit useHbridgesToDriveIdleStepper,"yes","no";If enabled we use two H-bridges to drive stepper idle air valve
+	bit multisparkEnable,"yes","no"
+	bit enableLaunchRetard,"yes","no";Enables absolute ignition timing control during launch (sets timing to the "Absolute Timing at Launch" value).
+	bit canInputBCM,"enabled","disabled"
+	bit consumeObdSensors,"yes","no";This property is useful if using rusEFI as TCM or BCM only
+	bit enableCanVss,"yes","no";Read VSS from OEM CAN bus according to selected CAN vehicle configuration.
+	bit stftIgnoreErrorMagnitude,"yes","no";If enabled, adjust at a constant rate instead of a rate proportional to the current lambda error. This mode may be easier to tune, and more tolerant of sensor noise.
+	bit vvtBooleanForVerySpecialCases,"true","false"
+	bit enableSoftwareKnock,"enabled","disabled"
+	bit verboseVVTDecoding,"enabled","disabled";Verbose info in console below engineSnifferRpmThreshold
+	bit invertCamVVTSignal,"Falling","Rising"
+	bit alphaNUseIat,"yes","no";When set to yes, it enables intake air temperature-based corrections for Alpha-N tuning strategies.
+	bit knockBankCyl1,"Channel 2","Channel 1"
+	bit knockBankCyl2,"Channel 2","Channel 1"
+	bit knockBankCyl3,"Channel 2","Channel 1"
+	bit knockBankCyl4,"Channel 2","Channel 1"
+	bit knockBankCyl5,"Channel 2","Channel 1"
+	bit knockBankCyl6,"Channel 2","Channel 1"
+	bit knockBankCyl7,"Channel 2","Channel 1"
+	bit knockBankCyl8,"Channel 2","Channel 1"
+	bit knockBankCyl9,"Channel 2","Channel 1"
+	bit knockBankCyl10,"Channel 2","Channel 1"
+	bit knockBankCyl11,"Channel 2","Channel 1"
+	bit knockBankCyl12,"Channel 2","Channel 1"
+	bit tcuEnabled,"enabled","disabled"
+	bit useRawOutputToDriveIdleStepper,"yes","no";If enabled we use four Push-Pull outputs to directly drive stepper idle air valve coils
+	bit verboseCan2,"Print all","Do not print";Print incoming and outgoing second bus CAN messages in rusEFI console
 
 	brain_input_pin_e[LOGIC_ANALYZER_CHANNEL_COUNT iterate] logicAnalyzerPins;
 	pin_output_mode_e mainRelayPinMode;
@@ -1072,38 +1103,6 @@ custom script_setting_t 4 scalar, F32, @OFFSET@, 		"",	   1,	   0, 0, 18000,	  2
 
 	custom vehicle_info_t @@VEHICLE_INFO_SIZE@@ string, ASCII, @OFFSET@, @@VEHICLE_INFO_SIZE@@
 	custom gppwm_note_t @@GPPWM_NOTE_SIZE@@ string, ASCII, @OFFSET@, @@GPPWM_NOTE_SIZE@@
-
-	bit idleReturnTargetRamp,"yes","no";Ramp the idle target down from the entry threshold over N seconds when returning to idle. Helps prevent overshooting (below) the idle target while returning to idle from coasting.
-	bit useInjectorFlowLinearizationTable,"yes","no"
-	bit useHbridgesToDriveIdleStepper,"yes","no";If enabled we use two H-bridges to drive stepper idle air valve
-	bit multisparkEnable,"yes","no"
-	bit enableLaunchRetard,"yes","no";Enables absolute ignition timing control during launch (sets timing to the "Absolute Timing at Launch" value).
-	bit canInputBCM,"enabled","disabled"
-	bit consumeObdSensors,"yes","no";This property is useful if using rusEFI as TCM or BCM only
-	bit enableCanVss,"yes","no";Read VSS from OEM CAN bus according to selected CAN vehicle configuration.
-	bit stftIgnoreErrorMagnitude,"yes","no";If enabled, adjust at a constant rate instead of a rate proportional to the current lambda error. This mode may be easier to tune, and more tolerant of sensor noise.
-	bit vvtBooleanForVerySpecialCases,"true","false"
-	bit enableSoftwareKnock,"enabled","disabled"
-	bit verboseVVTDecoding,"enabled","disabled";Verbose info in console below engineSnifferRpmThreshold
-	bit invertCamVVTSignal,"Falling","Rising"
-	bit alphaNUseIat,"yes","no";When set to yes, it enables intake air temperature-based corrections for Alpha-N tuning strategies.
-	bit knockBankCyl1,"Channel 2","Channel 1"
-	bit knockBankCyl2,"Channel 2","Channel 1"
-	bit knockBankCyl3,"Channel 2","Channel 1"
-	bit knockBankCyl4,"Channel 2","Channel 1"
-	bit knockBankCyl5,"Channel 2","Channel 1"
-	bit knockBankCyl6,"Channel 2","Channel 1"
-	bit knockBankCyl7,"Channel 2","Channel 1"
-	bit knockBankCyl8,"Channel 2","Channel 1"
-	bit knockBankCyl9,"Channel 2","Channel 1"
-	bit knockBankCyl10,"Channel 2","Channel 1"
-	bit knockBankCyl11,"Channel 2","Channel 1"
-	bit knockBankCyl12,"Channel 2","Channel 1"
-	bit tcuEnabled,"enabled","disabled"
-	! bit 27
-	bit useRawOutputToDriveIdleStepper,"yes","no";If enabled we use four Push-Pull outputs to directly drive stepper idle air valve coils
-	! bit 29
-	bit verboseCan2,"Print all","Do not print";Print incoming and outgoing second bus CAN messages in rusEFI console
 
 #define can_broadcast_channel_e_enum "first", "second", "3rd"
 custom can_broadcast_channel_e 1 bits, U08, @OFFSET@, [0:1], @@can_broadcast_channel_e_enum@@
@@ -1717,7 +1716,7 @@ uint16_t tuneHidingKey;;"", 1, 0, 0, 20000, 0
 
 #define fuel_pressure_sensor_mode_e_enum "Absolute", "Gauge", "Differential", "INVALID"
 custom fuel_pressure_sensor_mode_e 1 bits, U08, @OFFSET@, [0:1], @@fuel_pressure_sensor_mode_e_enum@@
-fuel_pressure_sensor_mode_e fuelPressureSensorMode
+fuel_pressure_sensor_mode_e fuelPressureSensorMode;Absolute: Sensor reads ~100 kPa (14.7 psi) with engine off and no fuel pressure.\nGauge: Sensor reads 0 with engine off and no fuel pressure (most common standard 0-10 bar / 0-150 psi sensors).\nDifferential: Sensor is connected to intake manifold vacuum and measures pressure difference directly.
 
 switch_input_pin_e[LUA_DIGITAL_INPUT_COUNT iterate] luaDigitalInputPins;
 	int16_t ALSMinRPM;;"rpm", 1, 0, 0, 20000, 0
@@ -2019,6 +2018,18 @@ end_struct
 	float misfireWobbleAlphaFall;Misfire Detection: wobble EMA alpha when spread is decreasing.;"", 1, 0, 0.001, 1, 3
 	uint16_t misfireSettleCycles;Misfire Detection: firings to wait after entering idle before flagging starts. 0 = immediate.;"cycles", 1, 0, 0, 5000, 0
 
+	! --- I2C interfaces ---
+	custom i2c_device_e 1 bits, U08, , @OFFSET@, [0:2], $i2c_device_e_list
+	custom i2c_speed_e 1 bits, U08, , @OFFSET@, [0:2], $i2c_speed_e_list
+
+	struct i2c_config_s
+		bit enabled,"yes","no"
+		i2c_speed_e speed
+		Gpio sdaPin;
+		Gpio sclPin;
+	end_struct
+
+	i2c_config_s[I2C_BUS_TOTAL_COUNT iterate] i2c;
 ! end of engine_configuration_s
 end_struct
 
@@ -2539,6 +2550,10 @@ bit wizardCrankTrigger,"yes","no"
 bit wizardCamTrigger,"yes","no"
 bit wizardInjectorFlow,"yes","no"
 bit wizardDisplacement,"yes","no"
+bit wizardCltSensor,"yes","no"
+bit wizardTps,"yes","no"
+bit wizardIgnitionOutputs,"yes","no"
+bit wizardInjectorOutputs,"yes","no"
 
 split_lines@@BOARD_CONFIG_FROM_FILE@@
 
@@ -2782,6 +2797,14 @@ end_struct
 #define ts_cic_idle false
 #define ts_show_egt true
 #define ts_show_k_line false
+#define ts_show_i2c1_enable true
+#define ts_show_i2c1_pins true
+#define ts_show_i2c2_enable true
+#define ts_show_i2c2_pins true
+#define ts_show_i2c3_enable true
+#define ts_show_i2c3_pins true
+#define ts_show_i2c4_enable true
+#define ts_show_i2c4_pins false
 #define ts_show_spi1_enable true
 #define ts_show_spi1_pins true
 #define ts_show_spi2_enable true
@@ -2867,6 +2890,7 @@ end_struct
 #define ts_show_trigger_pins true
 #define ts_show_intake_cam_edge true
 #define ts_show_strokes true
+#define ts_show_i2c false
 #define ts_show_spi true
 #define ts_show_sd_card true
 #define ts_show_can_pins true

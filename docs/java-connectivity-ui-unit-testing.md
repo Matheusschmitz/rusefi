@@ -30,7 +30,8 @@ rather than invent new machinery.
 1. **Hand-written fakes, no new mocking machinery.** The project uses
    `mockito-core` (cannot mock final classes) and deliberately does *not* add
    `mockito-inline`. Seams are narrow interfaces + plain fakes:
-   `FakePortScanner` (`java_console/ui/src/test/java/com/rusefi/FakePortScanner.java`)
+   `FakePortScanner` (`java_console/connectivity/src/testFixtures/java/com/rusefi/FakePortScanner.java`,
+   shared with `:ui` tests via `testFixtures(project(':connectivity'))`)
    implements `PortScanner` with scripted `fireHardwareChange(AvailableHardware)`
    and recorded `suspendCount`/`resumeCount`/`cachedPorts`/`invalidatedPorts`;
    `SerialPortScannerTest.FakeProbes` implements `SerialPortScanner.HardwareProbes`
@@ -90,22 +91,22 @@ rather than invent new machinery.
    `build.gradle` (`allprojects` + `useJUnitPlatform()`). Pure decision logic
    tests sit next to their module (`shared_io` has `FindFileHelperTest`,
    `ConnectedEcuTargetTest`, `BoardCompatibilityTest`); the connectivity-policy
-   tests currently live in `ui/src/test` alongside the fakes and could move to
-   `connectivity/src/test` (directory does not exist yet; no build change
-   needed) once `DeviceSessionManager` dependencies allow.
+   tests (`SerialPortScanner*Test`, `DeviceSessionManagerTest`, etc.) now live in
+   `connectivity/src/test`, with shared fakes such as `FakePortScanner` in
+   `connectivity/src/testFixtures` so `:ui` tests can consume them too.
 
 ## Coverage today (2026-07-08)
 
 | Area | Test | What it covers |
 | --- | --- | --- |
-| Scan policy | `ui` `SerialPortScannerTest` (13) | ttyS filtering, ECU caching vs Unknown retry, stale-node drop, unplug/replug eviction, listener-only-on-change, synthetic DFU port, device-probe throttle + last-known reuse, probe skip while connected, TCP not cached, `cachePort`/`invalidatePort`, ECU-first sort |
-| Session state machine | `ui` `DeviceSessionManagerTest` (15) | OpenBLT/DFU detection + precedence + disappearance, initial-port pre-cache, re-cache on reconnect, CONNECTING/CONNECTED, snapshot to late subscribers, FLASHING + watchdog pause/resume + post-flash rescan choreography (`FakeJobExecutor`) |
+| Scan policy | `connectivity` `SerialPortScannerTest` (13) | ttyS filtering, ECU caching vs Unknown retry, stale-node drop, unplug/replug eviction, listener-only-on-change, synthetic DFU port, device-probe throttle + last-known reuse, probe skip while connected, TCP not cached, `cachePort`/`invalidatePort`, ECU-first sort |
+| Session state machine | `connectivity` `DeviceSessionManagerTest` (15) | OpenBLT/DFU detection + precedence + disappearance, initial-port pre-cache, re-cache on reconnect, CONNECTING/CONNECTED, snapshot to late subscribers, FLASHING + watchdog pause/resume + post-flash rescan choreography (`FakeJobExecutor`) |
 | Flash mode/port decisions | `ui` `ProgramSelectorTest` | `mainButtonModeFor` (DFU/OpenBLT/live/offline), `resolveFlashPort` (bootloader wins, offline DFU>OpenBLT preference) |
 | Tune merge recovery | `ui` `CalibrationsHelper*Test` | `decidePostMerge` all actions (#9756 crash path), partial-merge failed-field tracking, `isUiContext` |
 | Firmware file targeting | `shared_io` `FindFileHelperTest` ×2 | `extractTargetFromFirmwareName`, `findXNumberOfFile` |
 | Persisted board target | `shared_io` `ConnectedEcuTargetTest` | live → persisted-file → bundle fallback chain |
 | Board compatibility | `shared_io` `BoardCompatibilityTest` | exact/wildcard/allowlist/QC-bypass matching |
-| UI status | `ui` `ConnectionStatusIconTest` | red/green/purple priority, bootloader tooltip, property-change reaction, null tab pane |
+| UI status | `ui` `ConnectionStatusIconTest` | red/green/purple priority, bootloader tooltip, offline tooltip (offline+disconnected, connected/bootloader precedence, property-change reaction), null tab pane |
 | Update-available check | `ui` `MainFrameUpdateCheckTest` | `needsFirmwareUpdate` null/unparseable inputs, new-format hash compare, legacy date compare |
 | Connectivity value types & helpers | `connectivity` `SerialPortCacheTest`, `AvailableHardwareTest`, `PortResultTest`, `SerialPortTypeTest`, `SerialPortScannerInspectPortsTest`, `RecurringStepTest` | cache eviction semantics, snapshot filtering/equality, PortResult identity contract, sort ranks, probe fan-out (dead port dropped, crash ⇒ Unknown), suspend-latch handshake — the Tier 1 batch, added 2026-07-08 |
 | Flash brick guard | `ui` `MaintenanceUtilTest` | `confirmFirmwareMatchesBoard`: matching/case-insensitive target, unparseable name no-false-alarm, `_QC_` compatibility, mismatch declined/accepted via `UserConfirm` seam; `ensureFirmwareForConnectedTarget` unverified-declined + live-verified-skip; plus the `containsPattern` normalization (Tiers 2–3, 2026-07-08) |
@@ -113,12 +114,24 @@ rather than invent new machinery.
 | Device tab presentation decisions | `ui` `DevicePaneTest` | bootloader-state classification, DFU/OpenBLT guidance text (platform-aware), offline-capable tab lock list; Tier 2, added 2026-07-08 |
 | Port classification pipeline | `ui` `EcuHardwareProbesInspectTest` | OpenBLT-first probing, stale-node/vanish ⇒ dropped, ECU-with/without-OpenBLT + calibrations, 3-attempt retry with between-attempts backoff, interrupt handling; Tier 3 item 1, added 2026-07-08 |
 | Post-flash reconnect wait | `ui` `AbstractAutoFlashJobAwaitEcuPortTest` | `awaitEcuPort`: immediate ECU, follow renumbered port, bootloader-grace flicker vs persistent OpenBLT/DFU giveup, timeout, interrupt; Tier 3 item 3, added 2026-07-08 |
+| Offline-mode UI state | `ui` `UIContextOfflineModeTest`, `TuningToolbarStateLabelTest` | `UIContext` offline flag default + setter + listener fan-out to every listener; Tuning toolbar dirty/offline label wording across all 4 offline×dirty combos (#9730, 2026-07-10) |
+| OpenBLT job choreography | `ui` `OpenBltManualJobTest`, `OpenBltSwitchJobTest` | manual flash: suspend-before-flash / invalidate+resume-after (also on failure and flasher crash), restore-only-after-resume, ensure-firmware abort before touching the scanner; switch: reboot-then-`close()` ordering, never `disconnect()` (renumber-follow invariant), port released even with no `BinaryProtocol`; Tier 3 item 4, added 2026-07-10 |
+| ECU-follow-across-reboot rule | `ui` `ConsoleUiEcuPortToFollowTest` | `ConsoleUI.ecuPortToFollow`: follows the single new ECU (incl. `EcuWithOpenblt`) once the old port vanished; stays put when disconnected-by-user, current port still present, never-connected, zero/multiple candidates, or candidate == current; Tier 3 item 6, added 2026-07-10 |
 
-Not covered anywhere: the flashing-job choreography (suspend → invalidate →
-resume, `close()`-not-`disconnect()`), `EcuHardwareProbes.inspect()`
-classification/retry, the ECU-follow-across-reboot rule in `ConsoleUI`,
-`MainFrame` title composition, `StartupFrame` port-list presentation and splash
-connection state machine.
+Not covered anywhere: `EcuHardwareProbes.inspect()`
+classification/retry, `MainFrame` title composition, `StartupFrame` port-list
+presentation and splash connection state machine.
+
+The offline-tune UI glue added with #9730 (2026-07-10) is only unit-tested at
+its pure edges (the two rows above). The Swing/IO-bound parts remain
+sandbox/manual-only, consistent with the tiering: `PinoutPane.showOfflineBoard`
+(needs the `pinouts_raw` board data + image render), `TuneManagementTab`'s
+import-pair visibility gating, and the splash→offline-console frame-reuse
+handoff (`StartupFrame.openOfflineConsole`, which the "not recommended" list
+already excludes as splash-machine territory). If any of these regress, the
+cheap seam is the same pattern used above — lift the decision (which board
+signature, whether to show the import pair) out of the Swing wiring into a pure
+helper and test that.
 
 ## Test backlog
 
@@ -258,24 +271,36 @@ sites.
    OpenBLT/DFU past grace ⇒ null before timeout; nothing on the bus ⇒ null at
    timeout; interrupt mid-wait ⇒ null + interrupt flag restored; `EcuWithOpenblt`
    counts as connectable.
-4. **OpenBLT job choreography** (`OpenBltManualJob` / `OpenBltSwitchJob`) —
-   suspend ⇒ invalidate ⇒ flash ⇒ resume ordering, and the
-   `linkManager.close()`-not-`disconnect()` invariant that keeps
-   `isDisconnectedByUser()` false so reconnect can follow the renumbered port.
-   Seam: inject the flasher call (functional interface around
-   `ProgramSelector.flashOpenbltSerial`); assert ordering on the fake scanner's
-   recorded calls.
+4. **OpenBLT job choreography** (`OpenBltManualJob` / `OpenBltSwitchJob`) — DONE
+   2026-07-10. `OpenBltManualJob` grew a nested `FlashSteps` seam (ensure-firmware /
+   flash / restore-calibrations; production `PRODUCTION_STEPS` wires the original
+   `MaintenanceUtil` / `ProgramSelector` / `CalibrationsHelper` statics, no call
+   sites changed) — the suspend/invalidate/resume choreography itself stays in
+   `doJob` under test. `OpenBltSwitchJob` grew a nested `Rebooter` seam around the
+   two `ProgramSelector.rebootToOpenblt` overloads. `OpenBltManualJobTest` (4,
+   scripted steps record the fake scanner's state at each step) covers
+   suspend-before-flash, invalidate+resume after success/failure/crash,
+   restore-only-after-resume-and-only-on-success, and the ensure-firmware abort
+   touching nothing. `OpenBltSwitchJobTest` (3, Mockito `InOrder` across the
+   rebooter and a mocked `LinkManager`) locks reboot-before-`close()` and the
+   `close()`-not-`disconnect()` invariant that keeps `isDisconnectedByUser()`
+   false so reconnect can follow the renumbered port.
 5. **`MainFrame.setTitle`** — extract a pure
    `composeTitle(isUpdating, bootloaderMode, connected, firmwareVersion, port,
    signature, offline, iniSignature)`; the priority ladder
    (UPDATING > BOOTLOADER > connected > OFFLINE > DISCONNECTED) is pure string
    logic currently welded to `ConsoleUI`/`FrameHelper`.
-6. **`ConsoleUI` ECU-follow-across-reboot rule** — currently an anonymous
-   listener inside the 285-line private constructor. Extract a static
-   predicate, e.g. `Optional<String> ecuPortToFollow(currentPort, commPorts,
-   ecuPorts, disconnectedByUser)`, and test: skips when disconnected-by-user,
-   when current port still present, when zero or multiple candidate ECU ports,
-   when candidate equals current; follows on exactly-one new ECU port.
+6. **`ConsoleUI` ECU-follow-across-reboot rule** — DONE 2026-07-10. Extracted
+   exactly as sketched: package-private static
+   `ConsoleUI.ecuPortToFollow(currentPort, commPorts, ecuPorts, disconnectedByUser)`
+   returning `Optional<String>`; the scanner listener in the constructor now just
+   gathers the four inputs and `ifPresent`-reconnects, and the
+   not-gated-on-isConnected rationale moved to the predicate's javadoc.
+   `ConsoleUiEcuPortToFollowTest` (8) covers: follows the single new ECU,
+   `EcuWithOpenblt` counts as connectable; empty on disconnected-by-user,
+   current-port-still-present (watchdog owns that reconnect), null current port,
+   zero candidates, multiple (ambiguous) candidates, and candidate == current
+   port (inconsistent scanner-vs-OS snapshot).
 7. **`MaintenanceUtil` confirm seam** — DONE 2026-07-08. The nested
    `UserConfirm` interface with package-private overloads (public methods
    delegate to the `confirmOnEdt` JOptionPane production impl).

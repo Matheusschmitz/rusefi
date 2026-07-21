@@ -7,7 +7,6 @@ import com.rusefi.binaryprotocol.BinaryProtocol;
 import com.rusefi.config.generated.Integration;
 import com.rusefi.core.FindFileHelper;
 import com.rusefi.autodetect.PortDetector;
-import com.rusefi.io.BootloaderHelper;
 import com.rusefi.io.LinkManager;
 import com.rusefi.io.UpdateOperationCallbacks;
 import com.rusefi.core.ui.AutoupdateUtil;
@@ -23,15 +22,12 @@ import org.jetbrains.annotations.Nullable;
 
 import javax.swing.*;
 import java.awt.*;
-import java.awt.event.ActionEvent;
-import java.awt.event.ActionListener;
 import java.awt.event.ItemEvent;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.io.EOFException;
 import java.util.concurrent.TimeUnit;
-import java.util.stream.Collectors;
 
 import static com.devexperts.logging.Logging.getLogging;
 import static com.rusefi.SerialPortType.OpenBlt;
@@ -39,14 +35,13 @@ import static com.rusefi.maintenance.CalibrationsHelper.*;
 import static com.rusefi.maintenance.CallbacksWaitingUtil.TOTAL_WAIT_SECONDS;
 import static com.rusefi.maintenance.CallbacksWaitingUtil.waitForPredicate;
 import static com.rusefi.maintenance.UpdateMode.*;
-import static java.lang.Boolean.parseBoolean;
 
 public class ProgramSelector {
     private static final Logging log = getLogging(ProgramSelector.class);
     private final JPanel content = new JPanel(new BorderLayout());
     private final JLabel noHardware = new JLabel("Nothing detected");
     private final JPanel updateModeAndButton = new JPanel(new FlowLayout());
-    private final JSplitButton splitButton = new JSplitButton("Update Firmware", AutoupdateUtil.loadIcon("upload48.png"));
+    private final JSplitButton splitButton = new JSplitButton("Update ECU Firmware", AutoupdateUtil.loadIcon("upload48.png"));
     private final ConnectivityContext connectivityContext;
     private final JComboBox<PortResult> comboPorts;
     @Nullable
@@ -57,6 +52,8 @@ public class ProgramSelector {
     public ProgramSelector(ConnectivityContext connectivityContext, JComboBox<PortResult> comboPorts) {
         this.connectivityContext = connectivityContext;
         this.comboPorts = comboPorts;
+        noHardware.setBorder(BorderFactory.createEmptyBorder(5, 8, 5, 8));
+        noHardware.setFont(noHardware.getFont().deriveFont(noHardware.getFont().getSize2D() + 2));
         content.add(updateModeAndButton, BorderLayout.NORTH);
         content.add(noHardware, BorderLayout.SOUTH);
 
@@ -190,16 +187,16 @@ public class ProgramSelector {
                 job = new StLinkJob(parent, connectivityContext.getConnectedEcuTarget());
                 break;
             case DFU_SWITCH:
-                job = new DfuSwitchJob(selectedPort, parent);
+                job = new DfuSwitchJob(selectedPort, parent, linkManager);
                 break;
             case OPENBLT_SWITCH:
-                job = new OpenBltSwitchJob(selectedPort, parent, linkManager);
+                job = new OpenBltSwitchJob(selectedPort, parent, linkManager, OpenbltRebooter.PRODUCTION_REBOOTER);
                 break;
             case OPENBLT_CAN:
                 job = new OpenBltCanJob(parent);
                 break;
             case OPENBLT_MANUAL:
-                job = new OpenBltManualJob(selectedPort, parent, connectivityContext);
+                job = OpenBltManualJobFactory.createProduction(selectedPort, parent, connectivityContext);
                 break;
             case OPENBLT_AUTO:
                 job = new OpenBltAutoJob(selectedPort, parent, connectivityContext, linkManager);
@@ -252,19 +249,6 @@ public class ProgramSelector {
     public static void rebootToOpenblt(JComponent parent, String selectedPort, UpdateOperationCallbacks callbacks) {
         String port = selectedPort == null ? PortDetector.AUTO : selectedPort;
         DfuFlasher.rebootToDfu(parent, port, callbacks, Integration.CMD_REBOOT_OPENBLT);
-    }
-
-    /**
-     * Send reboot-to-OpenBLT via an already-open BinaryProtocol connection.
-     * Use this from ConsoleUI context where the port is held by LinkManager.
-     */
-    public static void rebootToOpenblt(JComponent parent, BinaryProtocol binaryProtocol, UpdateOperationCallbacks callbacks) {
-        if (binaryProtocol == null) {
-            callbacks.logLine("Not connected?");
-            callbacks.error();
-            return;
-        }
-        BootloaderHelper.sendBootloaderRebootCommand(parent, binaryProtocol.signature, binaryProtocol.getStream(), callbacks, Integration.CMD_REBOOT_OPENBLT);
     }
 
     public static void flashOpenBltCan(JComponent parent, UpdateOperationCallbacks callbacks) {

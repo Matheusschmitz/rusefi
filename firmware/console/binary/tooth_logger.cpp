@@ -44,8 +44,10 @@
 
 #if EFI_TOOTH_LOGGER
 #if !EFI_SHAFT_POSITION_INPUT
-	fail("EFI_SHAFT_POSITION_INPUT required to have EFI_EMULATE_POSITION_SENSORS")
+	fail("EFI_SHAFT_POSITION_INPUT required to have EFI_TOOTH_LOGGER")
 #endif
+
+#include "tooth_logger_buffer.h"
 
 /**
  * Engine idles around 20Hz and revs up to 140Hz, at 60/2 and 8 cylinders we have about 20Khz events
@@ -109,13 +111,10 @@ void DisableToothLogger() {
 
 #else // not EFI_UNIT_TEST
 
-static constexpr size_t bufferCount = BIG_BUFFER_SIZE / sizeof(CompositeBuffer);
-static_assert(bufferCount >= 2);
-
-static chibios_rt::Mailbox<CompositeBuffer*, bufferCount> freeBuffers;
-static chibios_rt::Mailbox<CompositeBuffer*, bufferCount> filledBuffers;
-
-static CompositeBuffer* currentBuffer = nullptr;
+// The buffer lifecycle itself (free/filled queues, current buffer, 5 second
+// staleness flush) lives in ToothLoggerBufferPool - see tooth_logger_buffer.h.
+// This file owns the enabled flag, the current flag state 'cur', and the
+// TS-visible ready indication.
 
 static void setToothLogReady(bool value) {
 #if EFI_TUNER_STUDIO && (EFI_PROD_CODE || EFI_SIMULATOR)
@@ -123,34 +122,13 @@ static void setToothLogReady(bool value) {
 #endif // EFI_TUNER_STUDIO
 }
 
-static BigBufferHandle bufferHandle;
+static ToothLoggerBufferPool toothBuffers{setToothLogReady};
 
 bool EnableToothLogger(TLmode mode) {
 	chibios_rt::CriticalSectionLocker csl;
 
-	bufferHandle = getBigBuffer(BigBufferUser::ToothLogger);
-	if (!bufferHandle) {
+	if (!toothBuffers.startI()) {
 		return false;
-	}
-
-	CompositeBuffer* buffers = bufferHandle.get<CompositeBuffer>();
-
-	// Reset all buffers
-	for (size_t i = 0; i < bufferCount; i++) {
-		buffers[i].nextIdx = 0;
-	}
-
-	// Reset state
-	currentBuffer = nullptr;
-
-	// Empty the filled buffer list
-	CompositeBuffer* dummy;
-	while (MSG_TIMEOUT != filledBuffers.fetchI(&dummy))
-		;
-
-	// Put all buffers in the free list
-	for (size_t i = 0; i < bufferCount; i++) {
-		freeBuffers.postI(&buffers[i]);
 	}
 
 	// Enable logging of edges as they come
@@ -165,115 +143,27 @@ bool EnableToothLogger(TLmode mode) {
 void DisableToothLogger() {
 	chibios_rt::CriticalSectionLocker csl;
 
-	// Release the big buffer for another user
-	// C++ magic: here we are calling BigBufferHandle::operator=() with empty instance
-	bufferHandle = {};
+	toothBuffers.stopI();
 
 	ToothLoggerEnabled = false;
 	setToothLogReady(false);
 }
 
-static CompositeBuffer* GetToothLoggerBufferImpl(sysinterval_t timeout) {
-	CompositeBuffer* buffer;
-	msg_t msg = filledBuffers.fetch(&buffer, timeout);
-
-	if (msg == MSG_TIMEOUT) {
-		setToothLogReady(false);
-		return nullptr;
-	}
-
-	if (msg != MSG_OK) {
-		// What even happened if we didn't get timeout, but also didn't get OK?
-		return nullptr;
-	}
-
-	return buffer;
-}
-
 CompositeBuffer* GetToothLoggerBufferNonblocking() {
-	return GetToothLoggerBufferImpl(TIME_IMMEDIATE);
-}
-
-CompositeBuffer* GetToothLoggerBufferBlocking() {
-	return GetToothLoggerBufferImpl(TIME_INFINITE);
+	return toothBuffers.getFilled(TIME_IMMEDIATE);
 }
 
 void ReturnToothLoggerBuffer(CompositeBuffer* buffer) {
 	chibios_rt::CriticalSectionLocker csl;
 
-	msg_t msg = freeBuffers.postI(buffer);
-	efiAssertVoid(ObdCode::OBD_PCM_Processor_Fault, msg == MSG_OK, "Composite logger post to free buffer fail");
-
-	// If the used list is empty, clear the ready flag
-	if (filledBuffers.getUsedCountI() == 0) {
-		setToothLogReady(false);
-	}
-}
-
-static CompositeBuffer* findBuffer(efitick_t timestamp) {
-	CompositeBuffer* buffer;
-
-	if (!currentBuffer) {
-		// try and find a buffer, if none available, we can't log
-		if (MSG_OK != freeBuffers.fetchI(&buffer)) {
-			return nullptr;
-		}
-
-		// Record the time of the last buffer swap so we can force a swap after a minimum period of time
-		// This ensures the user sees *something* even if they don't have enough trigger events
-		// to fill the buffer.
-		buffer->startTime.reset(timestamp);
-		buffer->nextIdx = 0;
-
-		currentBuffer = buffer;
-	}
-
-	return currentBuffer;
+	toothBuffers.returnBufferI(buffer);
 }
 
 static void SetNextCompositeEntry(efitick_t timestamp) {
 	// This is called from multiple interrupts/threads, so we need a lock.
 	chibios_rt::CriticalSectionLocker csl;
 
-	CompositeBuffer* buffer = findBuffer(timestamp);
-
-	if (!buffer) {
-		// All buffers are full, nothing to do here.
-		return;
-	}
-
-	size_t idx = buffer->nextIdx;
-	auto nextIdx = idx + 1;
-	buffer->nextIdx = nextIdx;
-
-	if (idx < efi::size(buffer->buffer)) {
-		composite_logger_s* entry = &buffer->buffer[idx];
-
-		entry->x = cur.x;
-		entry->timestamp = NT2US(timestamp);
-
-		// TS uses big endian, grumble
-		// the whole order of all packet bytes is reversed, not just the 'endian-swap' integers
-		// swap whole record byteorder
-		entry->x = SWAP_UINT64(entry->x);
-	}
-
-	// if the buffer is full...
-	bool bufferFull = nextIdx >= efi::size(buffer->buffer);
-	// ... or it's been too long since the last flush
-	bool bufferTimedOut = buffer->startTime.hasElapsedSec(5);
-
-	// Then cycle buffers and set the ready flag.
-	if (bufferFull || bufferTimedOut) {
-		// Post to the output queue
-		filledBuffers.postI(buffer);
-
-		// Null the current buffer so we get a new one next time
-		currentBuffer = nullptr;
-
-		// Flag that we are ready
-		setToothLogReady(true);
-	}
+	toothBuffers.appendI(cur, timestamp);
 }
 
 #endif // not EFI_UNIT_TEST
@@ -446,20 +336,29 @@ static int ToothLoggerWriteBin(Writer &writer, CompositeBuffer* buffer) {
 bool ToothLoggerHasData() {
 	chibios_rt::CriticalSectionLocker csl;
 
-	return ((currentBuffer) ||
-		(filledBuffers.getUsedCountI() > 0));
-
+	return toothBuffers.hasDataI();
 }
 
+// binary vs CSV output format, latched at file creation - see ToothLoggerWriter()
 static bool sdTriggerLogCsv = 0;
 
+/**
+ * One iteration of SD card .teeth file writing, called from the SD thread
+ * (sdLoggerTooth() in mmc_card.cpp): waits up to 3 seconds for a filled buffer
+ * and appends it to the file, as raw binary records or CSV per sdTriggerLogCsv
+ * (decided once per file, on-the-fly format change is not supported).
+ *
+ * @return positive number of bytes written; 0 to request the caller close the
+ * file and start a new one on the next tooth event (3 second idle timeout, the
+ * partially-filled current buffer is flushed first); negative on error
+ */
 int ToothLoggerWriter(FileBufferedWriter &writer) {
 	int ret = 0;
 	CompositeBuffer* buffer = nullptr;
 	bool startNewFile = false;
 
-	// manualy pick buffer, do not use GetToothLoggerBufferImpl() as it changes TS buffer ready flag
-	msg_t msg = filledBuffers.fetch(&buffer, TIME_MS2I(3000));
+	// manualy pick buffer, do not use getFilled() as it changes TS buffer ready flag
+	msg_t msg = toothBuffers.fetchFilled(&buffer, TIME_MS2I(3000));
 	if ((msg != MSG_OK) && (msg != MSG_TIMEOUT)) {
 		// error?
 		return -1;
@@ -470,10 +369,7 @@ int ToothLoggerWriter(FileBufferedWriter &writer) {
 		startNewFile = true;
 
 		// flush data from currently writing buffer!
-		if (currentBuffer) {
-			buffer = currentBuffer;
-			currentBuffer = nullptr;
-		}
+		buffer = toothBuffers.flushCurrentI();
 	}
 
 	// can return nullptr
@@ -521,6 +417,12 @@ int ToothLoggerWriteCsv(Writer &writer, CompositeBuffer* buffer) {
 		composite_logger_s c;
 		c.x = SWAP_UINT64(buffer->buffer[i].x);
 
+		// recover timestamp
+		efitick_t raw_time = buffer->startTime.get() + USF2NT(c.timestamp);
+		efitick_t time_us = NT2US(raw_time);
+		uint32_t sec = time_us / 1000000;
+		uint32_t usec = time_us % 1000000;
+
 		// todo: take these data points from structure, not current values. Kind of works for slow sensors, but still!
 		float vbatt = Sensor::get(SensorType::BatteryVoltage).value_or(0);
 		float et = Sensor::get(SensorType::Clt).value_or(0);
@@ -532,7 +434,7 @@ int ToothLoggerWriteCsv(Writer &writer, CompositeBuffer* buffer) {
 					"%d, %d, %d, %d, %d, "
 					"%d, %d, "
 					"%d, %d, %d, %.2f, %.2f, %.2f, %.2f\r\n",	// TODO: convert to bitwise?
-				c.timestamp / 1000000, c.timestamp % 1000000,
+				sec, usec,
 				c.priLevel, c.cam1, c.cam2, c.cam3, c.cam4,
 				c.sync, c.tdc,
 				c.coil, c.injector, c.acr, vbatt, et, instantMap, tps);

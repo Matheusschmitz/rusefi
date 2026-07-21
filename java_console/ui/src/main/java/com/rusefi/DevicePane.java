@@ -6,6 +6,7 @@ import com.rusefi.ui.UIContext;
 import com.rusefi.ui.basic.MigrateSettingsCheckboxState;
 import com.rusefi.ui.basic.SingleAsyncJobExecutor;
 import com.rusefi.ui.basic.StatusPanelWithProgressBar;
+import com.rusefi.ui.basic.UpdateFirmwareResult;
 
 import javax.swing.*;
 import java.awt.*;
@@ -32,6 +33,8 @@ public class DevicePane {
     private final ProgramSelector selector;
     private final SingleAsyncJobExecutor jobExecutor;
     private final StatusPanelWithProgressBar statusPanel = new StatusPanelWithProgressBar();
+    private final JCheckBox autoUpdateBundle = new JCheckBox("Auto-update Software", AutoupdateProperty.get());
+    private final JCheckBox migrateSettings = new JCheckBox("Migrate Settings", true);
     // Previous state rendered on the EDT — used to detect the *transition* into a bootloader state so we
     // pull focus to the Device tab only once, not on every scan cycle [tag:better_ux_for_flashing].
     private SessionState lastRenderedState;
@@ -62,13 +65,11 @@ public class DevicePane {
         column.setLayout(new BoxLayout(column, BoxLayout.Y_AXIS));
         content.add(column, BorderLayout.NORTH);
 
-        JCheckBox autoUpdateBundle = new JCheckBox("Auto-update bundle", AutoupdateProperty.get());
         autoUpdateBundle.setAlignmentX(Component.LEFT_ALIGNMENT);
         autoUpdateBundle.addActionListener(e -> PersistentConfiguration.setBoolProperty(
             AutoupdateProperty.AUTO_UPDATE_BUNDLE_PROPERTY, autoUpdateBundle.isSelected()));
         column.add(autoUpdateBundle);
 
-        JCheckBox migrateSettings = new JCheckBox("Migrate Settings", true);
         migrateSettings.setAlignmentX(Component.LEFT_ALIGNMENT);
         migrateSettings.addActionListener(e -> MigrateSettingsCheckboxState.isMigrationNeeded = migrateSettings.isSelected());
         MigrateSettingsCheckboxState.isMigrationNeeded = true;
@@ -103,6 +104,10 @@ public class DevicePane {
 
         // ProgramSelector builds the DFU / OpenBLT menu straight from the detected hardware.
         selector.apply(effectiveHardware);
+        final boolean flashing = state == SessionState.FLASHING;
+        autoUpdateBundle.setEnabled(!flashing);
+        migrateSettings.setEnabled(!flashing);
+        comboPorts.setEnabled(!flashing);
 
         // The board is a usable live ECU only in CONNECTED. While it is being flashed or sits in a
         // DFU/OpenBLT bootloader, the live tabs show frozen/stale data — lock them and (on entry) pull
@@ -117,7 +122,7 @@ public class DevicePane {
     private void lockConsoleForState(final SessionState state) {
         final boolean flashing = state == SessionState.FLASHING;
         final boolean bootloaderPresent = isBootloaderState(state);
-        setNonDeviceTabsEnabled(!(flashing || bootloaderPresent));
+        setTabsEnabledForState(state);
         if (tabbedPane != null) {
             // Frame blink (#9715) signals an update *in progress* — only while actually flashing, not
             // while merely waiting in a bootloader for the user to start the update.
@@ -136,9 +141,13 @@ public class DevicePane {
             statusPanel.clear();
             statusPanel.log(bootloaderGuidance(state), true, false);
         } else if (state == SessionState.CONNECTED && lastRenderedState != SessionState.CONNECTED) {
-            // Board is a live ECU again (e.g. it rebooted to firmware after a flash) — clear any stale
-            // "Board is in the … bootloader" hint left in the status log. [tag:better_ux_for_flashing]
-            statusPanel.clear();
+            // Board is a live ECU again (e.g. it rebooted to firmware after a flash). Normally clear the
+            // stale "Board is in the … bootloader" hint — but if a firmware update just finished, preserve
+            // its (green/red) report so the success/failure survives the reconnect instead of being wiped
+            // (issue #9832). consumeLastResult() shows it once; a later unrelated reconnect clears normally.
+            if (jobExecutor.consumeLastResult() == UpdateFirmwareResult.NONE) {
+                statusPanel.clear();
+            }
         }
     }
 
@@ -201,20 +210,28 @@ public class DevicePane {
     }
 
     // Tabs usable without a live ECU: the Device tab (hosts the update controls), offline tune editing
-    // ("Tuning") and the pinout reference. These stay enabled while the board is in a bootloader or being
-    // flashed; only the live-data tabs get locked. [tag:better_ux_for_flashing]
+    // ("Tuning") and the pinout reference. Active flashing is stricter: Tuning can write if the old
+    // BinaryProtocol is still reachable, so only Device progress and Pinout remain available.
     static boolean isOfflineCapableTab(final String title) {
         return "Device".equals(title) || "Tuning".equals(title) || "Pinout".equals(title);
     }
 
-    private void setNonDeviceTabsEnabled(final boolean enabled) {
+    static boolean isTabEnabled(final String title, final SessionState state) {
+        if (state == SessionState.FLASHING) {
+            return "Device".equals(title) || "Pinout".equals(title);
+        }
+        if (isBootloaderState(state)) {
+            return isOfflineCapableTab(title);
+        }
+        return true;
+    }
+
+    private void setTabsEnabledForState(final SessionState state) {
         if (tabbedPane == null) {
             return;
         }
         for (int i = 0; i < tabbedPane.getTabCount(); i++) {
-            if (!isOfflineCapableTab(tabbedPane.getTitleAt(i))) {
-                tabbedPane.setEnabledAt(i, enabled);
-            }
+            tabbedPane.setEnabledAt(i, isTabEnabled(tabbedPane.getTitleAt(i), state));
         }
     }
 

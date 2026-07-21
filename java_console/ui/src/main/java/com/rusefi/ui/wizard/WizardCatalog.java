@@ -26,6 +26,7 @@ public class WizardCatalog {
         // ----- Flagged full-wizard steps (order matters; drives step numbering) -----
         new WizardStepDescriptor(
             "wizardNumberOfCylinders",
+            "Cylinders",
             true,
             NOT_HD81,
             null,
@@ -33,20 +34,47 @@ public class WizardCatalog {
         ),
         new WizardStepDescriptor(
             "wizardFiringOrder",
+            "Firing Order",
             true,
             NOT_HD81,
+            null,
+            null
+        ),
+        new WizardStepDescriptor(
+            "wizardDisplacement",
+            "Base VE Table",
+            true,
+            WizardStepDescriptor.ALWAYS,
             null,
             null
         ),
         new WizardStepDescriptor(
             "wizardMapSensorType",
+            "MAP Sensor",
             true,
             NOT_HD81,
             null,
             null
         ),
         new WizardStepDescriptor(
+            "wizardTps",
+            "TPS",
+            true,
+            WizardStepDescriptor.ALWAYS,
+            null,
+            null
+        ),
+        new WizardStepDescriptor(
+            "wizardCltSensor",
+            "CLT Sensor",
+            true,
+            WizardStepDescriptor.ALWAYS,
+            null,
+            null
+        ),
+        new WizardStepDescriptor(
             "wizardCrankTrigger",
+            "Crank Trigger",
             true,
             NOT_HD81,
             null,
@@ -54,6 +82,23 @@ public class WizardCatalog {
         ),
         new WizardStepDescriptor(
             "wizardCamTrigger",
+            "Cam Trigger",
+            true,
+            WizardStepDescriptor.ALWAYS,
+            null,
+            null
+        ),
+        new WizardStepDescriptor(
+            "wizardIgnitionOutputs",
+            "Ignition Outputs",
+            true,
+            WizardStepDescriptor.ALWAYS,
+            null,
+            null
+        ),
+        new WizardStepDescriptor(
+            "wizardInjectorOutputs",
+            "Injector Outputs",
             true,
             WizardStepDescriptor.ALWAYS,
             null,
@@ -61,6 +106,7 @@ public class WizardCatalog {
         ),
         new WizardStepDescriptor(
             "wizardInjectorFlow",
+            "Injector Flow",
             true,
             WizardStepDescriptor.ALWAYS,
             null,
@@ -69,6 +115,7 @@ public class WizardCatalog {
 
         // ----- Standalone auto-launch steps -----
         new WizardStepDescriptor(
+            null,
             null,
             true,
             boardNameContains(HdConstants.HD_81),

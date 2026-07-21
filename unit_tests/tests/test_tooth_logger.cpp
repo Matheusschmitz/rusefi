@@ -42,6 +42,7 @@ TEST(ToothLogger, WriteCsvRows) {
 
 	CompositeBuffer buf{};
 	buf.nextIdx = 2;
+	buf.startTime.reset(0);
 
 	// Row 0: timestamp 1.000002s, all flags zero
 	{
@@ -95,4 +96,85 @@ TEST(ToothLogger, WriteCsvRows) {
 		}
 	}
 	EXPECT_EQ(crlfCount, 2u);
+}
+
+// Entry timestamps are stored as microsecond offsets from the buffer's startTime;
+// the CSV writer must recover absolute time as startTime + offset.
+TEST(ToothLogger, WriteCsvRowsRecoverAbsoluteTime) {
+	EngineTestHelper eth(engine_type_e::TEST_ENGINE);
+
+	CompositeBuffer buf{};
+	buf.nextIdx = 3;
+	// Buffer acquired 100 seconds after boot
+	buf.startTime.reset(US2NT(100'000'000));
+
+	// Offsets: first entry in the buffer, a mid-buffer entry, and one just
+	// short of the 5 second buffer flush period (the largest possible offset).
+	const uint32_t offsetsUs[] = { 0, 1'000'002, 4'999'999 };
+
+	for (size_t i = 0; i < efi::size(offsetsUs); i++) {
+		composite_logger_s c{};
+		c.timestamp = offsetsUs[i];
+		buf.buffer[i].x = SWAP_UINT64(c.x);
+	}
+
+	StringWriter w;
+	int total = ToothLoggerWriteCsv(w, &buf);
+	EXPECT_GT(total, 0);
+
+	// Split rows and check the absolute timestamp prefix of each
+	const char* expectedPrefixes[] = { "100.000000, ", "101.000002, ", "104.999999, " };
+
+	size_t rowStart = 0;
+	for (size_t i = 0; i < efi::size(expectedPrefixes); i++) {
+		ASSERT_LT(rowStart, w.data.size());
+		EXPECT_EQ(w.data.compare(rowStart, strlen(expectedPrefixes[i]), expectedPrefixes[i]), 0)
+			<< "row " << i << ": " << w.data.substr(rowStart, 30);
+
+		size_t rowEnd = w.data.find("\r\n", rowStart);
+		ASSERT_NE(rowEnd, std::string::npos);
+		rowStart = rowEnd + 2;
+	}
+
+	// No extra rows
+	EXPECT_EQ(rowStart, w.data.size());
+}
+
+// A completely full buffer (nextIdx == toothLoggerEntriesPerBuffer) must emit
+// exactly one row per entry and stay within array bounds.
+TEST(ToothLogger, WriteCsvFullBuffer) {
+	EngineTestHelper eth(engine_type_e::TEST_ENGINE);
+
+	CompositeBuffer buf{};
+	buf.nextIdx = toothLoggerEntriesPerBuffer;
+	buf.startTime.reset(0);
+
+	// Distinct, increasing offsets; the last one stays under the 5 s flush period
+	for (size_t i = 0; i < toothLoggerEntriesPerBuffer; i++) {
+		composite_logger_s c{};
+		c.timestamp = i * 20'000; // 20 ms apart -> last entry at 4.980000 s
+		c.priLevel = (i % 2) == 0;
+		buf.buffer[i].x = SWAP_UINT64(c.x);
+	}
+
+	StringWriter w;
+	int total = ToothLoggerWriteCsv(w, &buf);
+
+	EXPECT_GT(total, 0);
+	EXPECT_EQ((size_t)total, w.data.size());
+
+	// One CRLF-terminated row per entry
+	size_t crlfCount = 0;
+	for (size_t i = 0; i + 1 < w.data.size(); i++) {
+		if (w.data[i] == '\r' && w.data[i + 1] == '\n') {
+			crlfCount++;
+		}
+	}
+	EXPECT_EQ(crlfCount, toothLoggerEntriesPerBuffer);
+
+	// First and last rows carry the expected timestamps
+	EXPECT_EQ(w.data.compare(0, 10, "0.000000, "), 0) << w.data.substr(0, 30);
+	size_t lastRow = w.data.rfind("4.980000, ");
+	ASSERT_NE(lastRow, std::string::npos);
+	EXPECT_EQ(w.data.find("\r\n", lastRow) + 2, w.data.size());
 }

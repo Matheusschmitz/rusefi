@@ -1,6 +1,7 @@
 package com.opensr5;
 
 import com.opensr5.ini.field.EnumIniField;
+import com.opensr5.ini.field.OrdinalOutOfRangeException;
 import com.opensr5.ini.field.ScalarIniField;
 import com.rusefi.config.FieldType;
 import org.junit.jupiter.api.Test;
@@ -8,6 +9,7 @@ import org.junit.jupiter.api.Test;
 import java.util.TreeMap;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 public class ConfigurationImageGetterSetterTest {
     /**
@@ -32,6 +34,84 @@ public class ConfigurationImageGetterSetterTest {
         String value = ConfigurationImageGetterSetter.getStringValue(field, ci);
         assertEquals("\"Auto\"", value);
     }
+    /**
+     * Sparse key-value enum lists (pin dropdowns) omit INVALID placeholder entries,
+     * see PinoutLogic.enumToOptionsList()
+     */
+    @Test
+    public void testEnumIniFieldSparseKeyValueMap() {
+        TreeMap<Integer, String> map = new TreeMap<>();
+        map.put(0, "NONE");
+        map.put(5, "Injector 1");
+        map.put(47, "Coil 1");
+        EnumIniField.EnumKeyValueMap enumMap = new EnumIniField.EnumKeyValueMap(map);
+
+        // ordinal present in the map
+        EnumIniField field = new EnumIniField("injectionPins1", 0, FieldType.UINT8, enumMap, 0, 7);
+        assertEquals("\"Coil 1\"", ConfigurationImageGetterSetter.getStringValue(field, new ConfigurationImage(new byte[]{47, 0})));
+
+        // ordinal in a gap: pin exists in the tune but is not exposed by this board's ini
+        assertEquals("\"INVALID\"", ConfigurationImageGetterSetter.getStringValue(field, new ConfigurationImage(new byte[]{33, 0})));
+
+        // ordinal beyond the highest known entry
+        assertThrows(OrdinalOutOfRangeException.class,
+            () -> ConfigurationImageGetterSetter.getStringValue(field, new ConfigurationImage(new byte[]{48, 0})));
+    }
+
+    @Test
+    public void testLegacyEnumSuffixCompatibilityRejectsUnsafeMatches() {
+        TreeMap<Integer, String> map = new TreeMap<>();
+        map.put(1, "Output (variant A)");
+        map.put(2, "Output (variant B)");
+        EnumIniField field = new EnumIniField("output", 0, FieldType.UINT8,
+            new EnumIniField.EnumKeyValueMap(map), 0, 7, true);
+        ConfigurationImage image = new ConfigurationImage(new byte[4]);
+
+        assertThrows(IllegalArgumentException.class,
+            () -> ConfigurationImageGetterSetter.setValue2(field, image, "output", "\"Output\""));
+        assertThrows(IllegalArgumentException.class,
+            () -> ConfigurationImageGetterSetter.setValue2(field, image, "output", "\"Different output\""));
+
+        TreeMap<Integer, String> unrecognizedSuffixMap = new TreeMap<>();
+        unrecognizedSuffixMap.put(1, "OutputExtended");
+        EnumIniField unrecognizedSuffixField = new EnumIniField("output", 0, FieldType.UINT8,
+            new EnumIniField.EnumKeyValueMap(unrecognizedSuffixMap), 0, 7, true);
+        assertThrows(IllegalArgumentException.class,
+            () -> ConfigurationImageGetterSetter.setValue2(
+                unrecognizedSuffixField, image, "output", "\"Output\""));
+    }
+
+    @Test
+    public void testLegacyPinEnumAcceptsKnownAdditiveSuffixes() {
+        String[] currentLabels = {
+            "Output (documentation)",
+            "Output or alternate function",
+            "Output for low count wheel",
+            "Output best for normal wheels",
+            "Output, auxiliary use",
+            "Output legacy connector A",
+        };
+        for (String currentLabel : currentLabels) {
+            TreeMap<Integer, String> map = new TreeMap<>();
+            map.put(3, currentLabel);
+            EnumIniField field = new EnumIniField("output", 0, FieldType.UINT8,
+                new EnumIniField.EnumKeyValueMap(map), 0, 7, true);
+            ConfigurationImage image = new ConfigurationImage(new byte[4]);
+
+            ConfigurationImageGetterSetter.setValue2(field, image, "output", "\"Output\"");
+            assertEquals("\"" + currentLabel + "\"",
+                ConfigurationImageGetterSetter.getStringValue(field, image));
+        }
+
+        TreeMap<Integer, String> ordinaryEnumMap = new TreeMap<>();
+        ordinaryEnumMap.put(3, "Output or alternate function");
+        EnumIniField ordinaryEnum = new EnumIniField("mode", 0, FieldType.UINT8,
+            new EnumIniField.EnumKeyValueMap(ordinaryEnumMap), 0, 7);
+        assertThrows(IllegalArgumentException.class,
+            () -> ConfigurationImageGetterSetter.setValue2(
+                ordinaryEnum, new ConfigurationImage(new byte[4]), "mode", "\"Output\""));
+    }
+
     @Test
     public void testGetStringValueWithPrecision() {
         ConfigurationImage ci = new ConfigurationImage(new byte[4]);

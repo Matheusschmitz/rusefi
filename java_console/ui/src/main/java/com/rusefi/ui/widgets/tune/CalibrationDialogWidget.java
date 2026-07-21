@@ -57,6 +57,8 @@ public class CalibrationDialogWidget {
     private final TriggerImageHelper triggerImageHelper = new TriggerImageHelper();
     private ConfigurationImage workingImage;
     private IniFileModel currentIniFileModel;
+    private TriggerImageHelper.Channel triggerImageChannel = TriggerImageHelper.Channel.PRIMARY;
+    private int fieldRowVerticalMargin;
     private final List<ExpressionRow> expressionRows = new ArrayList<>();
     private final List<IndicatorPanel> indicatorPanels = new ArrayList<>();
     private final List<ReadoutLabelEntry> readoutEntries = new ArrayList<>();
@@ -66,6 +68,8 @@ public class CalibrationDialogWidget {
     private Consumer<ConfigurationImage> onConfigChange;
     /** Called when the user picks "Show in Pinout" on a pin-enum field; arg is the current enum value. */
     private Consumer<String> onShowInPinout;
+    /** Restores the last navigated view; set on every update() call so the VE generator panel can return to it. */
+    private Runnable currentViewRestorer;
 
     public void setOnConfigChange(Consumer<ConfigurationImage> onConfigChange) {
         this.onConfigChange = onConfigChange;
@@ -73,6 +77,10 @@ public class CalibrationDialogWidget {
 
     public void setOnShowInPinout(Consumer<String> onShowInPinout) {
         this.onShowInPinout = onShowInPinout;
+    }
+
+    public void setFieldRowVerticalMargin(int margin) {
+        fieldRowVerticalMargin = margin;
     }
 
     /**
@@ -177,6 +185,9 @@ public class CalibrationDialogWidget {
     }
 
     public void update(DialogModel dialogModel, IniFileModel iniFileModel, ConfigurationImage ci) {
+        final DialogModel capturedDm = dialogModel;
+        final IniFileModel capturedIni = iniFileModel;
+        currentViewRestorer = () -> update(capturedDm, capturedIni, workingImage);
         workingImage = ci != null ? ci.clone() : null;
         currentIniFileModel = iniFileModel;
         expressionRows.clear();
@@ -189,6 +200,7 @@ public class CalibrationDialogWidget {
             if (uiName == null || uiName.isEmpty()) {
                 uiName = dialogModel.getKey();
             }
+            triggerImageChannel = triggerImageHelper.getChannel(dialogModel.getKey(), uiName);
             contentPane.setName(uiName);
 
             applyLayout(contentPane, dialogModel.getLayoutHint());
@@ -197,7 +209,7 @@ public class CalibrationDialogWidget {
 
             if (triggerImageHelper.isTriggerPanel(dialogModel.getKey(), uiName)) {
                 triggerImageHelper.addTriggerPanelExtras(contentPane);
-                triggerImageHelper.updateTriggerImage(currentIniFileModel, workingImage);
+                updateTriggerImage();
             }
         }
         contentPane.revalidate();
@@ -221,6 +233,9 @@ public class CalibrationDialogWidget {
     }
 
     public void update(String key, IniFileModel iniFileModel, ConfigurationImage ci) {
+        final String capturedKey = key;
+        final IniFileModel capturedIniForRestore = iniFileModel;
+        currentViewRestorer = () -> update(capturedKey, capturedIniForRestore, workingImage);
         contentPane.removeAll();
         if (key != null) {
             DialogModel dialog = iniFileModel.getDialogs().get(key);
@@ -235,6 +250,15 @@ public class CalibrationDialogWidget {
             TableModel table = iniFileModel.getTable(key);
             if (table != null) {
                 contentPane.setLayout(new BoxLayout(contentPane, BoxLayout.Y_AXIS));
+                //TODO: nicer injection of this button? maybe a comment on the .ini and then hook this?
+                if ("veTableTbl".equals(table.getTableId())) {
+                    final IniFileModel capturedIni = iniFileModel;
+                    JButton genVeBtn = new JButton("Generate base VE...");
+                    genVeBtn.addActionListener(e -> showVeGeneratorPanel(capturedIni));
+                    JPanel veToolbar = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 4));
+                    veToolbar.add(genVeBtn);
+                    contentPane.add(veToolbar);
+                }
                 TuningTableView tuningTableView = new TuningTableView(table.getTitle());
                 tuningTableView.displayTable(iniFileModel, table.getTableId(), workingImage);
                 tuningTableView.setOnEdit(notifyEdit);
@@ -320,8 +344,10 @@ public class CalibrationDialogWidget {
     private void renderField(JPanel container, DialogModel.Field field, IniFileModel iniFileModel, ConfigurationImage ci) {
         Runnable onChange = () -> {
             refreshExpressions();
-            if ("trigger_type".equalsIgnoreCase(field.getKey())) {
-                triggerImageHelper.updateTriggerImage(currentIniFileModel, workingImage);
+            if ("trigger_type".equalsIgnoreCase(field.getKey()) ||
+                "vvtMode1".equalsIgnoreCase(field.getKey()) ||
+                "vvtMode2".equalsIgnoreCase(field.getKey())) {
+                updateTriggerImage();
             }
         };
         Optional<IniField> iniField = iniFileModel.findIniField(field.getKey());
@@ -333,6 +359,11 @@ public class CalibrationDialogWidget {
                 return CalibrationFieldFactory.createLabelRow(field);
             }
         }).orElseGet(() -> CalibrationFieldFactory.createLabelRow(field));
+        if (fieldRowVerticalMargin > 0 && iniField.isPresent()) {
+            row.setBorder(BorderFactory.createEmptyBorder(
+                fieldRowVerticalMargin, 0, fieldRowVerticalMargin, 0));
+            CalibrationFieldFactory.fixRowHeight(row);
+        }
 
         boolean hasExpressions = field.getEnableExpression() != null || field.getVisibleExpression() != null;
         if (hasExpressions) {
@@ -376,6 +407,21 @@ public class CalibrationDialogWidget {
         }
     }
 
+    private void showVeGeneratorPanel(IniFileModel ini) {
+        if (workingImage == null) return;
+        Runnable restorer = currentViewRestorer;
+        contentPane.removeAll();
+        contentPane.setLayout(new BorderLayout());
+        VeTableGeneratorPanel panel = new VeTableGeneratorPanel(
+            ini, workingImage,
+            patched -> { workingImage = patched; if (onConfigChange != null) onConfigChange.accept(workingImage); },
+            () -> { if (restorer != null) restorer.run(); }
+        );
+        contentPane.add(panel, BorderLayout.CENTER);
+        contentPane.revalidate();
+        contentPane.repaint();
+    }
+
     private void renderPanelEntry(JPanel container, PanelModel panel, IniFileModel iniFileModel, ConfigurationImage ci,
                                   boolean isBorderLayout, JPanel[] horizontalPanelRef, Runnable notifyEdit) {
         String placement = panel.getPlacement();
@@ -417,6 +463,17 @@ public class CalibrationDialogWidget {
             tuningTableView.displayTable(iniFileModel, table.getTableId(), workingImage);
             tuningTableView.setOnEdit(notifyEdit);
             JComponent content = tuningTableView.getContent();
+            if ("veTableTbl".equals(table.getTableId())) {
+                final IniFileModel capturedIni = iniFileModel;
+                JButton genVeBtn = new JButton("Generate base VE...");
+                genVeBtn.addActionListener(e -> showVeGeneratorPanel(capturedIni));
+                JPanel veToolbar = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 4));
+                veToolbar.add(genVeBtn);
+                JPanel wrapper = new JPanel(new BorderLayout());
+                wrapper.add(veToolbar, BorderLayout.NORTH);
+                wrapper.add(content, BorderLayout.CENTER);
+                content = wrapper;
+            }
             CalibrationFieldFactory.applyStyle(content);
             content.setAlignmentX(Component.LEFT_ALIGNMENT);
             if (constraint != null) targetContainer.add(content, constraint); else targetContainer.add(content);
@@ -440,7 +497,12 @@ public class CalibrationDialogWidget {
 
             if (triggerImageHelper.isTriggerPanel(subDialog.getKey(), uiName) || "Sub Panel".equals(uiName)) {
                 triggerImageHelper.addTriggerPanelExtras(panelWidget);
-                triggerImageHelper.updateTriggerImage(currentIniFileModel, workingImage);
+                TriggerImageHelper.Channel channel = triggerImageHelper.getChannel(subDialog.getKey(), uiName);
+                if (channel == TriggerImageHelper.Channel.SECONDARY) {
+                    triggerImageHelper.updateVvtTriggerImage(currentIniFileModel, workingImage);
+                } else {
+                    triggerImageHelper.updateTriggerImage(currentIniFileModel, workingImage, channel);
+                }
             }
         } else {
             panelWidget.setName(panel.getPanelName());
@@ -490,6 +552,14 @@ public class CalibrationDialogWidget {
         refreshIndicators();
         if (onConfigChange != null) {
             onConfigChange.accept(workingImage);
+        }
+    }
+
+    private void updateTriggerImage() {
+        if (triggerImageChannel == TriggerImageHelper.Channel.SECONDARY) {
+            triggerImageHelper.updateVvtTriggerImage(currentIniFileModel, workingImage);
+        } else {
+            triggerImageHelper.updateTriggerImage(currentIniFileModel, workingImage, triggerImageChannel);
         }
     }
 
@@ -567,6 +637,10 @@ public class CalibrationDialogWidget {
     }
 
     private JComponent buildGaugeCell(GaugeModel gaugeModel) {
+        if (GraphicsEnvironment.isHeadless()) {
+            return new JLabel(gaugeModel.getName());
+        }
+
         double lo = resolveGaugeValue(gaugeModel.getLowValueValue(), gaugeModel.getLowValue());
         double hi = resolveGaugeValue(gaugeModel.getHighValueValue(), gaugeModel.getHighValue());
         Radial radial = SensorGauge.createRadial(hi, lo, gaugeModel);

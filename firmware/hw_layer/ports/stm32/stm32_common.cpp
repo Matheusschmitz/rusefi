@@ -31,10 +31,31 @@ extern "C" {
 #include "mpu_util.h"
 #include "backup_ram.h"
 
+// the bootloader does not compile storage.cpp - keep it out of this interlock
+#if EFI_CONFIGURATION_STORAGE && !defined(EFI_BOOTLOADER)
+#include "storage.h"
+#define EFI_STORAGE_REBOOT_INTERLOCK TRUE
+#endif
+
 #ifndef ALLOW_JUMP_WITH_IGNITION_VOLTAGE
 // stm32 bootloader might touch uart ports which we cannot allow on boards where uart pins are used to control engine coils etc
 #define ALLOW_JUMP_WITH_IGNITION_VOLTAGE TRUE
 #endif
+
+void rebootNow() {
+	#ifdef STM32H7XX
+		// H7 needs a forcible reset of the USB peripheral(s) in order for the bootloader to work properly.
+		// If you don't do this, the bootloader will execute, but USB doesn't work (nobody knows why)
+		// See https://community.st.com/s/question/0D53W00000vQEWsSAO/stm32h743-dfu-entry-doesnt-work-unless-boot0-held-high-at-poweron
+	#ifdef STM32H723xx
+		RCC->AHB1ENR &= ~(RCC_AHB1ENR_USB1OTGHSEN);
+	#else
+		RCC->AHB1ENR &= ~(RCC_AHB1ENR_USB1OTGHSEN | RCC_AHB1ENR_USB2OTGFSEN);
+	#endif
+	#endif
+
+	NVIC_SystemReset();
+}
 
 static bool reset_and_jump(void) {
 #if !ALLOW_JUMP_WITH_IGNITION_VOLTAGE
@@ -42,6 +63,13 @@ static bool reset_and_jump(void) {
     configError("Not allowed with ignition power");
     return false;
   }
+#endif
+
+#ifdef EFI_STORAGE_REBOOT_INTERLOCK
+	// Let any queued or in-flight settings/LTFT flash write finish before we
+	// reset: a reset in the middle of a sector erase/program corrupts the
+	// sector being written and can leave the device hung until power cycle.
+	storageWaitIdle(STORAGE_WAIT_IDLE_TIMEOUT_MS);
 #endif
 
 	#ifdef STM32H7XX
@@ -56,7 +84,7 @@ static bool reset_and_jump(void) {
 	#endif
 
 	// and now reboot
-	NVIC_SystemReset();
+	rebootNow();
 
 	return true;
 }
@@ -160,8 +188,6 @@ void startWatchdog(int timeoutMs) {
 }
 
 static efitimems_t watchdogResetPeriodMs = 0;
-// Reset watchod reset counted in SharedParams after this delay
-static const efitimems_t watchdogCounterResetDelay = 3000;
 
 void setWatchdogResetPeriod(int resetMs) {
 #if 0
@@ -173,22 +199,11 @@ void setWatchdogResetPeriod(int resetMs) {
 void tryResetWatchdog() {
 #if HAL_USE_WDG
 	static Timer lastTimeWasReset;
-	static efitimems_t wdUptime = 0;
 	// check if it's time to reset the watchdog
 	if (lastTimeWasReset.hasElapsedMs(watchdogResetPeriodMs)) {
 		// we assume tryResetWatchdog() is called from a timer callback
 		wdgResetI(&WDGD1);
 		lastTimeWasReset.reset();
-		// with 100 ms WD
-		if (wdUptime < watchdogCounterResetDelay) {
-			wdUptime += watchdogResetPeriodMs;
-			// we just crossed the treshold
-			if (wdUptime >= watchdogCounterResetDelay) {
-#if EFI_USE_OPENBLT
-				SharedParamsWriteByIndex(1, 0);
-#endif
-			}
-		}
 	}
 #endif // HAL_USE_WDG
 }
@@ -306,6 +321,8 @@ const char *getStm32McuName(int mcuRevision) {
       return "F42x";
     case 1105:
       return "F7";
+    case 0x483:
+      return "H7";
   }
   return "unknown";
 }
