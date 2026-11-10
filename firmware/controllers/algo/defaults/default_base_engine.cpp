@@ -226,6 +226,12 @@ bool applyDefaultsOrFixAfterBurn(const engine_configuration_s* previousConfigura
     changed = true;
   }
 
+  // [tag:transient_timing] Tunes that predate transient timing have an all-zero RPM axis.
+  if (config->transientTimingRpmBins[0] == 0 && config->transientTimingRpmBins[TRANSIENT_TIMING_SIZE - 1] == 0) {
+    setDefaultTransientTiming();
+    changed = true;
+  }
+
   // [tag:fuel_top_up] Tunes that predate the top-up pulse have an all-zero RPM axis and
   // mode Off. Seed the example window so the curves are editable; it stays off.
   {

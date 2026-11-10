@@ -881,6 +881,13 @@ typedef enum __attribute__ ((__packed__)) {
 	TPS_EVENT_CONFIRM_3 = 3,
 } tps_event_confirmation_e;
 
+// IMPORTANT: This enum must be kept in sync with transient_timing_mode_e in transient_timing_tables.txt
+typedef enum __attribute__ ((__packed__)) {
+	TRANSIENT_TIMING_OFF = 0,
+	TRANSIENT_TIMING_LOG_ONLY = 1,
+	TRANSIENT_TIMING_APPLY = 2,
+} transient_timing_mode_e;
+
 #if __cplusplus
 #include <cstdint>
 
