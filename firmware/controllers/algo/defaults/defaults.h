@@ -13,6 +13,7 @@ void setGDIFueling();
 void setHpfpLobeProfileAngle(int lobes);
 void setGdiWallWetting();
 void setDefaultAeCltCorrection();
+void setDefaultFuelTopUp();
 void setInline4();
 void setDynoDefaults();
 void setupTLE9201(Gpio controlPin, Gpio direction, Gpio disable, int dcIndex = 0);

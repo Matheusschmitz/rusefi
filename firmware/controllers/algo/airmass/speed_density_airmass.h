@@ -39,5 +39,4 @@ private:
 	float m_initialPredictedMap = 0;
 	// Measured MAP from the latest predictive call, the base of the predicted excess.
 	float m_predictionMeasuredMap = 0;
-	float m_tpsPeak = 0;
 };
