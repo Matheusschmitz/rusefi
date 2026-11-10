@@ -184,6 +184,19 @@ public class GeneratedIniValidatorTest {
     }
 
     @Test
+    public void helpMustNotDirectlyFollowALiveGraph(@TempDir Path directory) throws IOException {
+        String graph = DEFINITIONS + "[UserDefined]\ndialog = parent, \"Parent\", border\n"
+                + "liveGraph = graph, \"Graph\", South\ngraphLine = rpm\n";
+        String help = "help = parentHelp, \"Parent\"\ntext = \"Text<br>\"\n";
+        IllegalStateException e = assertThrows(IllegalStateException.class,
+                () -> validate(directory, graph + help));
+        assertTrue(e.getMessage().contains("references.ini:12: Help [parentHelp] directly follows a liveGraph"),
+                e.getMessage());
+        validate(directory, graph + "dialog = next\nfield = \"Setting\", setting\n" + help
+                + "help = otherHelp, \"Other\"\ntext = \"Text<br>\"\n");
+    }
+
+    @Test
     public void undefinedGaugesMenusAndMacrosAreRejected(@TempDir Path directory) {
         for (String usage : new String[]{
                 "[UserDefined]\ndialog = test\ngauge = missing\n",
