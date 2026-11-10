@@ -390,6 +390,12 @@ table in `Center` and the settings/status panel in `East`. `West` keeps the
 table's preferred width, leaving an empty center instead of expanding the table
 when the window is widened (see the VE blend dialogs).
 
+A `border` dialog shows one component per region. A second `panel`, `liveGraph`
+or `gauge` in the same region replaces the first, even while the later one is
+hidden by its visibility condition, so the first panel's fields disappear. Stack
+conditional panels inside a child dialog placed in that region (see
+`fuelTopUpHeader`); `IniReferenceValidator` rejects a repeated region.
+
 For Lambda/AFR views of a target adder, use one table editor and one display
 alias per native table, switching its units and scale like the main target
 table. Separate Lambda and AFR editors over overlapping calibration storage
