@@ -620,6 +620,8 @@ void Engine::periodicFastCallback() {
 	} else {
 		module<TpsAccelEnrichment>()->onInvalidTps();
 	}
+	// [tag:transient_timing] After the detector, before the timing math below.
+	module<TransientTiming>()->update(getTimeNowNt());
 
 	engineState.periodicFastCallback();
 

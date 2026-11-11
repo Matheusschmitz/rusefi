@@ -209,6 +209,12 @@ bool applyDefaultsOrFixAfterBurn(const engine_configuration_s* previousConfigura
     changed = true;
   }
 
+  // [tag:transient_timing] Tunes that predate transient timing have an all-zero RPM axis.
+  if (config->transientTimingRpmBins[0] == 0 && config->transientTimingRpmBins[TRANSIENT_TIMING_SIZE - 1] == 0) {
+    setDefaultTransientTiming();
+    changed = true;
+  }
+
 #if HW_PROTEUS && defined(STM32F4XX)
   // should have been proteus per-board validation
   if (engineConfiguration->is_enabled_spi_5) {
