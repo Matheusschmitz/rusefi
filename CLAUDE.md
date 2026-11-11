@@ -409,12 +409,6 @@ hidden by its visibility condition, so the first panel's fields disappear. Stack
 conditional panels inside a child dialog placed in that region (see
 `fuelTopUpHeader`); `IniReferenceValidator` rejects a repeated region.
 
-TunerStudio does not start a `help` entry that directly follows a `liveGraph`: the help's
-`text` lines become unlabeled fields of the liveGraph's dialog, and so do those of the help
-blocks after it. Keep help blocks together after a plain dialog, as `transient_fueling.ini`
-and the template's help catalog do; `IniReferenceValidator` rejects a help right after a
-liveGraph.
-
 For Lambda/AFR views of a target adder, use one table editor and one display
 alias per native table, switching its units and scale like the main target
 table. Separate Lambda and AFR editors over overlapping calibration storage

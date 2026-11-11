@@ -34,7 +34,6 @@ final class IniReferenceValidator {
     // Components already placed in the current border dialog, by region.
     private final Map<String, Row> borderRegions = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
     private boolean inBorderDialog;
-    private String previousComponent = "";
     private final Set<String> errors = new LinkedHashSet<>();
 
     IniReferenceValidator(Path file, List<String> lines) {
@@ -57,7 +56,6 @@ final class IniReferenceValidator {
                 section = line.substring(1, line.length() - 1).toLowerCase(Locale.ROOT);
                 parentLine = 0;
                 inBorderDialog = false;
-                previousComponent = "";
                 continue;
             }
             int equals = line.indexOf('=');
@@ -81,20 +79,7 @@ final class IniReferenceValidator {
             rows.add(row);
             collect(row);
             borderRegion(row);
-            helpPlacement(row);
         }
-    }
-
-    /** TunerStudio does not start a help entry that directly follows a liveGraph: its text lines
-     * become unlabeled fields of the liveGraph's dialog, and so do those of any help after it. */
-    private void helpPlacement(Row row) {
-        if (!UI_SECTIONS.contains(row.section) || !COMPONENTS.contains(row.keyword)) {
-            return;
-        }
-        if (row.keyword.equals("help") && previousComponent.equals("livegraph")) {
-            error(row, "Help [" + row.arg(0) + "] directly follows a liveGraph: define it after a dialog or another help");
-        }
-        previousComponent = row.keyword;
     }
 
     /** A border layout shows one component per region: TunerStudio displays only the last one
